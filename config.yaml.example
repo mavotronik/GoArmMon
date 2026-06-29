@@ -1,0 +1,75 @@
+telegram:
+  token: "YOUR_BOT_TOKEN"
+  allowed_users:
+    - 123456789
+
+logging:
+  level: INFO
+  file: ""
+
+hosts:
+  - name: router
+    description: "Home router"
+    group: home
+    skip_on_ping_failure: true
+    alerts:
+      rtt:
+        warning: 100
+        critical: 500
+        recovery: 80
+      http_response:
+        warning: 1000
+        critical: 3000
+        recovery: 800
+    checks:
+      - type: ping
+        address: 192.168.1.1
+        timeout: 3s
+        interval: 5s
+      - type: http
+        url: http://192.168.1.1/
+        method: GET
+        expected_code: 200
+        follow_redirects: true
+        timeout: 5s
+        interval: 30s
+
+  - name: server
+    description: "Server"
+    group: home
+    skip_on_ping_failure: true
+    alerts:
+      cpu:
+        warning: 70
+        critical: 90
+        recovery: 60
+      ram:
+        warning: 80
+        critical: 95
+        recovery: 70
+      swap:
+        critical: 80
+        recovery: 60
+      disk:
+        critical: 90
+        recovery: 80
+        ignore_devices:
+          - loop*
+          - zram*
+        ignore_mounts:
+          - /boot
+          - /boot/efi
+          - /snap
+          - /var/lib/docker/*
+    checks:
+      - type: ping
+        address: 192.168.1.69
+        timeout: 3s
+        interval: 5s
+      - type: glances
+        url: http://192.168.1.69:61208
+        api_version: auto
+        username: ""
+        password: ""
+        timeout: 10s
+        interval: 15s
