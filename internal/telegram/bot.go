@@ -163,8 +163,23 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 	}
 }
 
+func (b *Bot) NotifyStartup(cfgPath string) {
+	hostCount := len(b.cache.ListHosts())
+	text := fmt.Sprintf(
+		"<b>STARTUP</b>\nMonitor service started\nConfig: %s\nHosts: %d\n%s",
+		escapeHTML(cfgPath),
+		hostCount,
+		time.Now().Format(time.RFC3339),
+	)
+	b.sendToAll(text)
+}
+
 func (b *Bot) notifyEvent(ev alerts.Event) {
 	text := fmt.Sprintf("<b>%s</b>\n%s\n%s", strings.ToUpper(string(ev.Kind)), ev.Message, ev.At.Format(time.RFC3339))
+	b.sendToAll(text)
+}
+
+func (b *Bot) sendToAll(text string) {
 	for id := range b.allowed {
 		msg := tgbotapi.NewMessage(id, text)
 		msg.ParseMode = tgbotapi.ModeHTML

@@ -80,6 +80,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	slog.Info("monitor started", "config", e.cfgPath)
+	e.bot.NotifyStartup(e.cfgPath)
 	updates := e.bot.UpdatesChannel()
 	e.bot.Run(ctx, updates, e.alerts.Events())
 
