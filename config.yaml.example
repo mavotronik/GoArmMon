@@ -39,6 +39,7 @@ hosts:
     group: home
     skip_on_ping_failure: true
     alerts:
+      for: 2m
       cpu:
         warning: 70
         critical: 90

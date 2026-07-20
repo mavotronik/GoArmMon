@@ -38,12 +38,18 @@ const (
 	levelCritical
 )
 
+type metricState struct {
+	level       metricLevel
+	breachSince time.Time
+}
+
 type Manager struct {
 	mu      sync.Mutex
 	hosts   map[string]config.HostConfig
 	checks  map[string]state.Status
-	metrics map[string]metricLevel
+	metrics map[string]metricState
 	events  chan Event
+	now     func() time.Time
 }
 
 func NewManager(hosts []config.HostConfig, buffer int) *Manager {
@@ -53,8 +59,9 @@ func NewManager(hosts []config.HostConfig, buffer int) *Manager {
 	m := &Manager{
 		hosts:   make(map[string]config.HostConfig),
 		checks:  make(map[string]state.Status),
-		metrics: make(map[string]metricLevel),
+		metrics: make(map[string]metricState),
 		events:  make(chan Event, buffer),
+		now:     time.Now,
 	}
 	m.UpdateHosts(hosts)
 	return m
@@ -143,7 +150,7 @@ func (m *Manager) evalRTT(host config.HostConfig, snap state.CheckSnapshot, curr
 		return state.StatusOffline
 	}
 	value := float64(snap.RTT.Milliseconds())
-	return m.evalMetric(snap.CheckID, "rtt", host.Alerts.RTT, value, current)
+	return m.evalMetric(snap.CheckID, "rtt", host.Alerts.RTT, value, current, host.Alerts.For)
 }
 
 func (m *Manager) evalHTTPResponse(host config.HostConfig, snap state.CheckSnapshot, current state.Status) state.Status {
@@ -154,7 +161,7 @@ func (m *Manager) evalHTTPResponse(host config.HostConfig, snap state.CheckSnaps
 		return state.StatusOffline
 	}
 	value := float64(snap.HTTPDuration.Milliseconds())
-	return m.evalMetric(snap.CheckID, "http_response", host.Alerts.HTTPResponse, value, current)
+	return m.evalMetric(snap.CheckID, "http_response", host.Alerts.HTTPResponse, value, current, host.Alerts.For)
 }
 
 func (m *Manager) evalGlances(host config.HostConfig, snap state.CheckSnapshot) state.Status {
@@ -165,16 +172,16 @@ func (m *Manager) evalGlances(host config.HostConfig, snap state.CheckSnapshot) 
 	g := snap.Glances
 
 	if host.Alerts.CPU != nil && host.Alerts.CPU.Enabled() {
-		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "cpu", host.Alerts.CPU, g.CPU)))
+		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "cpu", host.Alerts.CPU, g.CPU, host.Alerts.For)))
 	}
 	if host.Alerts.RAM != nil && host.Alerts.RAM.Enabled() {
-		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "ram", host.Alerts.RAM, g.RAM)))
+		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "ram", host.Alerts.RAM, g.RAM, host.Alerts.For)))
 	}
 	if host.Alerts.Swap != nil && host.Alerts.Swap.Enabled() {
-		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "swap", host.Alerts.Swap, g.Swap)))
+		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "swap", host.Alerts.Swap, g.Swap, host.Alerts.For)))
 	}
 	if host.Alerts.Disk != nil && host.Alerts.Disk.Enabled() {
-		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "disk", &host.Alerts.Disk.Threshold, g.MaxDiskPct)))
+		st = state.WorstStatus(st, metricToStatus(m.evalMetricLevel(snap.CheckID, "disk", &host.Alerts.Disk.Threshold, g.MaxDiskPct, host.Alerts.For)))
 	}
 	return st
 }
@@ -190,8 +197,8 @@ func metricToStatus(level metricLevel) state.Status {
 	}
 }
 
-func (m *Manager) evalMetric(checkID, name string, th *config.Threshold, value float64, current state.Status) state.Status {
-	level := m.evalMetricLevel(checkID, name, th, value)
+func (m *Manager) evalMetric(checkID, name string, th *config.Threshold, value float64, current state.Status, defaultFor *string) state.Status {
+	level := m.evalMetricLevel(checkID, name, th, value, defaultFor)
 	st := metricToStatus(level)
 	if current == state.StatusOffline {
 		return state.StatusOffline
@@ -199,55 +206,79 @@ func (m *Manager) evalMetric(checkID, name string, th *config.Threshold, value f
 	return state.WorstStatus(state.StatusOnline, st)
 }
 
-func (m *Manager) evalMetricLevel(checkID, name string, th *config.Threshold, value float64) metricLevel {
+func (m *Manager) evalMetricLevel(checkID, name string, th *config.Threshold, value float64, defaultFor *string) metricLevel {
 	key := checkID + ":" + name
-	prev := m.metricLevel(key)
+	prev := m.metricState(key)
 
 	critical := th.Critical != nil && value >= *th.Critical
 	warning := th.Warning != nil && value >= *th.Warning
 
-	switch prev {
+	switch prev.level {
 	case levelCritical:
 		recovery := th.RecoveryForCritical()
 		if value <= recovery {
 			if th.Warning != nil && value >= *th.Warning {
-				m.setMetricLevel(key, levelWarning)
+				m.setMetricState(key, metricState{level: levelWarning})
 				return levelWarning
 			}
-			m.setMetricLevel(key, levelNone)
+			m.setMetricState(key, metricState{})
 			return levelNone
 		}
 		return levelCritical
 	case levelWarning:
 		if critical {
-			m.setMetricLevel(key, levelCritical)
+			m.setMetricState(key, metricState{level: levelCritical})
 			return levelCritical
 		}
 		recovery := th.RecoveryForWarning()
 		if value <= recovery {
-			m.setMetricLevel(key, levelNone)
+			m.setMetricState(key, metricState{})
 			return levelNone
 		}
 		return levelWarning
 	default:
-		if critical {
-			m.setMetricLevel(key, levelCritical)
-			return levelCritical
+		if !warning && !critical {
+			m.setMetricState(key, metricState{})
+			return levelNone
 		}
-		if warning {
-			m.setMetricLevel(key, levelWarning)
-			return levelWarning
-		}
-		return levelNone
+		return m.applyForbearance(key, th, defaultFor, critical, warning)
 	}
 }
 
-func (m *Manager) metricLevel(key string) metricLevel {
+func (m *Manager) applyForbearance(key string, th *config.Threshold, defaultFor *string, critical, warning bool) metricLevel {
+	forbearance, err := th.Forbearance(defaultFor)
+	if err != nil || forbearance == 0 {
+		if critical {
+			m.setMetricState(key, metricState{level: levelCritical})
+			return levelCritical
+		}
+		m.setMetricState(key, metricState{level: levelWarning})
+		return levelWarning
+	}
+
+	prev := m.metricState(key)
+	now := m.now()
+	if prev.breachSince.IsZero() {
+		m.setMetricState(key, metricState{breachSince: now})
+		return levelNone
+	}
+	if now.Sub(prev.breachSince) < forbearance {
+		return levelNone
+	}
+	if critical {
+		m.setMetricState(key, metricState{level: levelCritical})
+		return levelCritical
+	}
+	m.setMetricState(key, metricState{level: levelWarning})
+	return levelWarning
+}
+
+func (m *Manager) metricState(key string) metricState {
 	return m.metrics[key]
 }
 
-func (m *Manager) setMetricLevel(key string, level metricLevel) {
-	m.metrics[key] = level
+func (m *Manager) setMetricState(key string, st metricState) {
+	m.metrics[key] = st
 }
 
 func (m *Manager) emitTransition(snap state.CheckSnapshot, oldStatus, newStatus state.Status) {

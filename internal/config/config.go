@@ -35,18 +35,20 @@ type HostConfig struct {
 }
 
 type HostAlerts struct {
-	CPU          *Threshold     `yaml:"cpu"`
-	RAM          *Threshold     `yaml:"ram"`
-	Swap         *Threshold     `yaml:"swap"`
-	Disk         *DiskThreshold `yaml:"disk"`
-	RTT          *Threshold     `yaml:"rtt"`
-	HTTPResponse *Threshold     `yaml:"http_response"`
+	For            *string        `yaml:"for"`
+	CPU            *Threshold     `yaml:"cpu"`
+	RAM            *Threshold     `yaml:"ram"`
+	Swap           *Threshold     `yaml:"swap"`
+	Disk           *DiskThreshold `yaml:"disk"`
+	RTT            *Threshold     `yaml:"rtt"`
+	HTTPResponse   *Threshold     `yaml:"http_response"`
 }
 
 type Threshold struct {
 	Warning  *float64 `yaml:"warning"`
 	Critical *float64 `yaml:"critical"`
 	Recovery *float64 `yaml:"recovery"`
+	For      *string  `yaml:"for"`
 }
 
 type CheckDefinition struct {
@@ -159,4 +161,17 @@ func (t *Threshold) RecoveryForCritical() float64 {
 
 func (t *Threshold) Enabled() bool {
 	return t != nil && (t.Warning != nil || t.Critical != nil)
+}
+
+// Forbearance returns how long a metric must stay above threshold before alerting.
+// Per-metric "for" overrides the host-level default.
+func (t *Threshold) Forbearance(defaultFor *string) (time.Duration, error) {
+	s := defaultFor
+	if t != nil && t.For != nil {
+		s = t.For
+	}
+	if s == nil || *s == "" {
+		return 0, nil
+	}
+	return ParseDuration(*s, "for")
 }
