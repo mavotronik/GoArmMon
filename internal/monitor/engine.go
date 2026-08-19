@@ -51,11 +51,9 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.alerts = alerts.NewManager(cfg.Hosts, 256)
 	e.sched = scheduler.New(e.cache, e.alerts)
 
-	bot, err := telegram.New(cfg.Telegram, e.cache)
-	if err != nil {
-		return fmt.Errorf("telegram: %w", err)
-	}
+	bot := telegram.New(cfg.Telegram, e.cache)
 	e.bot = bot
+	bot.SetStartupConfigPath(e.cfgPath)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -80,9 +78,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	slog.Info("monitor started", "config", e.cfgPath)
-	e.bot.NotifyStartup(e.cfgPath)
-	updates := e.bot.UpdatesChannel()
-	e.bot.Run(ctx, updates, e.alerts.Events())
+	e.bot.Run(ctx, e.alerts.Events())
 
 	e.sched.Stop()
 	return nil

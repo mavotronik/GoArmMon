@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"goarmmon/internal/alerts"
@@ -14,43 +15,59 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+const connectRetryInterval = 5 * time.Second
+
 type Bot struct {
-	api      *tgbotapi.BotAPI
-	cfg      config.TelegramConfig
-	cache    *state.Cache
-	allowed  map[int64]struct{}
+	apiMu           sync.RWMutex
+	api             *tgbotapi.BotAPI
+	cfg             config.TelegramConfig
+	cache           *state.Cache
+	allowed         map[int64]struct{}
+	stats           *connStats
+	startupNotified bool
+	startupCfgPath  string
 }
 
-func New(cfg config.TelegramConfig, cache *state.Cache) (*Bot, error) {
-	api, err := tgbotapi.NewBotAPI(cfg.Token)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg config.TelegramConfig, cache *state.Cache) *Bot {
 	allowed := make(map[int64]struct{}, len(cfg.AllowedUsers))
 	for _, id := range cfg.AllowedUsers {
 		allowed[id] = struct{}{}
 	}
 	return &Bot{
-		api:     api,
 		cfg:     cfg,
 		cache:   cache,
 		allowed: allowed,
-	}, nil
+		stats:   newConnStats(),
+	}
 }
 
-func (b *Bot) Run(ctx context.Context, updates tgbotapi.UpdatesChannel, events <-chan alerts.Event) {
+func (b *Bot) Run(ctx context.Context, events <-chan alerts.Event) {
+	go b.connectionLoop(ctx)
+
+	var updates tgbotapi.UpdatesChannel
 	for {
+		if updates == nil {
+			if !b.waitConnected(ctx) {
+				return
+			}
+			updates = b.updatesChannel()
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
-			b.api.StopReceivingUpdates()
+			b.stopReceivingUpdates()
 			return
 		case update, ok := <-updates:
 			if !ok {
-				return
+				updates = nil
+				b.clearAPI()
+				continue
 			}
 			b.handleUpdate(update)
 		case ev, ok := <-events:
 			if !ok {
+				b.stopReceivingUpdates()
 				return
 			}
 			b.notifyEvent(ev)
@@ -58,10 +75,108 @@ func (b *Bot) Run(ctx context.Context, updates tgbotapi.UpdatesChannel, events <
 	}
 }
 
-func (b *Bot) UpdatesChannel() tgbotapi.UpdatesChannel {
+func (b *Bot) waitConnected(ctx context.Context) bool {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			if b.apiClient() != nil {
+				return true
+			}
+		}
+	}
+}
+
+func (b *Bot) connectionLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if b.apiClient() != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(connectRetryInterval):
+			}
+			continue
+		}
+
+		api, err := tgbotapi.NewBotAPI(b.cfg.Token)
+		if err != nil {
+			b.stats.recordFailure()
+			slog.Warn("telegram connect failed", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(connectRetryInterval):
+			}
+			continue
+		}
+
+		b.setAPI(api)
+		slog.Info("telegram connected", "username", api.Self.UserName)
+
+		b.apiMu.Lock()
+		notifyStartup := !b.startupNotified
+		cfgPath := b.startupCfgPath
+		b.apiMu.Unlock()
+		if notifyStartup && cfgPath != "" {
+			_, _, failed, _ := b.stats.counts()
+			b.notifyStartup(cfgPath, failed)
+			b.apiMu.Lock()
+			b.startupNotified = true
+			b.apiMu.Unlock()
+		}
+	}
+}
+
+func (b *Bot) SetStartupConfigPath(path string) {
+	b.apiMu.Lock()
+	b.startupCfgPath = path
+	b.apiMu.Unlock()
+}
+
+func (b *Bot) apiClient() *tgbotapi.BotAPI {
+	b.apiMu.RLock()
+	defer b.apiMu.RUnlock()
+	return b.api
+}
+
+func (b *Bot) setAPI(api *tgbotapi.BotAPI) {
+	b.apiMu.Lock()
+	b.api = api
+	b.apiMu.Unlock()
+}
+
+func (b *Bot) clearAPI() {
+	b.apiMu.Lock()
+	b.api = nil
+	b.apiMu.Unlock()
+}
+
+func (b *Bot) stopReceivingUpdates() {
+	b.apiMu.RLock()
+	api := b.api
+	b.apiMu.RUnlock()
+	if api != nil {
+		api.StopReceivingUpdates()
+	}
+}
+
+func (b *Bot) updatesChannel() tgbotapi.UpdatesChannel {
+	api := b.apiClient()
+	if api == nil {
+		return nil
+	}
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-	return b.api.GetUpdatesChan(u)
+	return api.GetUpdatesChan(u)
 }
 
 func (b *Bot) allowedUser(id int64) bool {
@@ -114,6 +229,8 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 		text = b.formatHTTP()
 	case "glances":
 		text = b.formatGlances()
+	case "stats":
+		text = b.formatStats()
 	default:
 		text = "Unknown command. Use /help."
 	}
@@ -123,7 +240,7 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	if markup != nil {
 		msg.ReplyMarkup = markup
 	}
-	if _, err := b.api.Send(msg); err != nil {
+	if _, err := b.send(msg); err != nil {
 		slog.Warn("telegram send failed", "error", err)
 	}
 }
@@ -153,25 +270,42 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 	if markup != nil {
 		edit.ReplyMarkup = markup
 	}
-	if _, err := b.api.Send(edit); err != nil {
+	if _, err := b.send(edit); err != nil {
 		slog.Warn("telegram edit failed", "error", err)
 	}
 
 	callback := tgbotapi.NewCallback(q.ID, "")
-	if _, err := b.api.Request(callback); err != nil {
+	if _, err := b.request(callback); err != nil {
 		slog.Warn("telegram callback ack failed", "error", err)
 	}
 }
 
-func (b *Bot) NotifyStartup(cfgPath string) {
+func (b *Bot) notifyStartup(cfgPath string, failedAttempts int) {
 	hostCount := len(b.cache.ListHosts())
 	text := fmt.Sprintf(
-		"<b>STARTUP</b>\nMonitor service started\nConfig: %s\nHosts: %d\n%s",
+		"<b>STARTUP</b>\nMonitor service started\nConfig: %s\nHosts: %d\nFailed connect attempts: %d\n%s",
 		escapeHTML(cfgPath),
 		hostCount,
+		failedAttempts,
 		time.Now().Format(time.RFC3339),
 	)
 	b.sendToAll(text)
+}
+
+func (b *Bot) send(ch tgbotapi.Chattable) (tgbotapi.Message, error) {
+	api := b.apiClient()
+	if api == nil {
+		return tgbotapi.Message{}, fmt.Errorf("telegram not connected")
+	}
+	return api.Send(ch)
+}
+
+func (b *Bot) request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	api := b.apiClient()
+	if api == nil {
+		return nil, fmt.Errorf("telegram not connected")
+	}
+	return api.Request(c)
 }
 
 func (b *Bot) notifyEvent(ev alerts.Event) {
@@ -183,7 +317,7 @@ func (b *Bot) sendToAll(text string) {
 	for id := range b.allowed {
 		msg := tgbotapi.NewMessage(id, text)
 		msg.ParseMode = tgbotapi.ModeHTML
-		if _, err := b.api.Send(msg); err != nil {
+		if _, err := b.send(msg); err != nil {
 			slog.Warn("telegram notify failed", "user", id, "error", err)
 		}
 	}
@@ -210,6 +344,7 @@ func helpText() string {
 		"/ping - ping RTT",
 		"/http - http check results",
 		"/glances - glances summary",
+		"/stats - telegram API stats",
 	}, "\n")
 }
 
@@ -372,6 +507,34 @@ func (b *Bot) formatGlances() string {
 		g := s.Glances
 		sb.WriteString(fmt.Sprintf("• %s: CPU %.1f%%, RAM %.1f%%, Swap %.1f%%\n", s.HostName, g.CPU, g.RAM, g.Swap))
 	}
+	return sb.String()
+}
+
+func (b *Bot) formatStats() string {
+	hour, day, total, startedAt := b.stats.counts()
+	uptime := time.Since(startedAt).Round(time.Second)
+
+	var sb strings.Builder
+	sb.WriteString("<b>Telegram API stats</b>\n")
+
+	api := b.apiClient()
+	if api == nil {
+		sb.WriteString("Status: <b>disconnected</b>\n")
+		sb.WriteString("Ping: n/a\n")
+	} else {
+		sb.WriteString("Status: <b>connected</b>\n")
+		start := time.Now()
+		if _, err := api.GetMe(); err != nil {
+			sb.WriteString(fmt.Sprintf("Ping: error (%s)\n", escapeHTML(err.Error())))
+		} else {
+			sb.WriteString(fmt.Sprintf("Ping: %s\n", time.Since(start).Round(time.Millisecond)))
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("Failed attempts (1h): %d\n", hour))
+	sb.WriteString(fmt.Sprintf("Failed attempts (24h): %d\n", day))
+	sb.WriteString(fmt.Sprintf("Failed attempts (total): %d\n", total))
+	sb.WriteString(fmt.Sprintf("Monitor uptime: %s\n", uptime))
 	return sb.String()
 }
 
