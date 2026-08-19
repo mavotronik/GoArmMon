@@ -205,38 +205,53 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	var text string
 	var markup *tgbotapi.InlineKeyboardMarkup
 
+	userID := update.Message.From.ID
+
 	switch cmd {
 	case "start":
-		text = "Glances Telegram Monitor\n\nUse /help for commands."
+		text = welcomeText()
+		markup = mainMenuKeyboard()
 	case "help":
 		text = helpText()
+		markup = mainMenuKeyboard()
 	case "list":
 		text = b.formatList()
+		markup = actionKeyboard("list")
 	case "status":
 		text = b.formatStatusAll()
-		markup = b.statusKeyboard("")
+		markup = b.statusMenuKeyboard("")
 	case "host":
 		if args == "" {
-			text = "Usage: /host <name>"
+			text = "Choose a host from the menu."
+			markup = b.hostsMenuKeyboard()
 		} else {
 			text = b.formatHost(args)
+			markup = hostDetailKeyboard(args)
 		}
 	case "alerts":
 		text = b.formatAlerts()
+		markup = actionKeyboard("alerts")
 	case "uptime":
 		text = b.formatUptime()
+		markup = actionKeyboard("uptime")
 	case "ping":
 		text = b.formatPing()
+		markup = actionKeyboard("ping")
 	case "http":
 		text = b.formatHTTP()
+		markup = actionKeyboard("http")
 	case "glances":
 		text = b.formatGlances()
+		markup = actionKeyboard("glances")
 	case "stats":
 		text = b.formatStats()
+		markup = actionKeyboard("stats")
 	case "notify_partial":
-		text = b.setNotifyPartial(update.Message.From.ID, args)
+		text = settingsText(b.setNotifyPartial(userID, args))
+		markup = b.settingsMenuKeyboard(userID)
 	default:
 		text = "Unknown command. Use /help."
+		markup = mainMenuKeyboard()
 	}
 
 	msg := tgbotapi.NewMessage(update.Message.Chat.ID, text)
@@ -251,22 +266,68 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 
 func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 	data := q.Data
+	userID := q.From.ID
 	var text string
 	var markup *tgbotapi.InlineKeyboardMarkup
 
 	switch {
-	case data == "status:all":
+	case data == cbMenuMain:
+		text = menuTitle("main")
+		markup = mainMenuKeyboard()
+	case data == cbMenuStatus:
 		text = b.formatStatusAll()
-		markup = b.statusKeyboard("")
-	case strings.HasPrefix(data, "status:group:"):
-		group := strings.TrimPrefix(data, "status:group:")
+		markup = b.statusMenuKeyboard("")
+	case data == cbMenuHosts:
+		text = menuTitle("hosts")
+		markup = b.hostsMenuKeyboard()
+	case data == cbMenuChecks:
+		text = menuTitle("checks")
+		markup = checksMenuKeyboard()
+	case data == cbMenuSettings:
+		text = settingsText("")
+		markup = b.settingsMenuKeyboard(userID)
+	case data == cbActionList:
+		text = b.formatList()
+		markup = actionKeyboard("list")
+	case data == cbActionAlerts:
+		text = b.formatAlerts()
+		markup = actionKeyboard("alerts")
+	case data == cbActionPing:
+		text = b.formatPing()
+		markup = actionKeyboard("ping")
+	case data == cbActionHTTP:
+		text = b.formatHTTP()
+		markup = actionKeyboard("http")
+	case data == cbActionGlances:
+		text = b.formatGlances()
+		markup = actionKeyboard("glances")
+	case data == cbActionUptime:
+		text = b.formatUptime()
+		markup = actionKeyboard("uptime")
+	case data == cbActionStats:
+		text = b.formatStats()
+		markup = actionKeyboard("stats")
+	case data == cbActionHelp:
+		text = helpText()
+		markup = mainMenuKeyboard()
+	case strings.HasPrefix(data, cbNotifyPartial):
+		arg := strings.TrimPrefix(data, cbNotifyPartial)
+		text = settingsText(b.setNotifyPartial(userID, arg))
+		markup = b.settingsMenuKeyboard(userID)
+	case data == cbStatusAll:
+		text = b.formatStatusAll()
+		markup = b.statusMenuKeyboard("")
+	case strings.HasPrefix(data, cbStatusGroup):
+		group := strings.TrimPrefix(data, cbStatusGroup)
 		text = b.formatStatusGroup(group)
-		markup = b.statusKeyboard(group)
-	case strings.HasPrefix(data, "status:host:"):
-		host := strings.TrimPrefix(data, "status:host:")
+		markup = b.statusMenuKeyboard(group)
+	case strings.HasPrefix(data, cbStatusHost):
+		host := strings.TrimPrefix(data, cbStatusHost)
 		text = b.formatHost(host)
+		markup = hostDetailKeyboard(host)
 	default:
 		text = "Unknown action"
+		markup = mainMenuKeyboard()
 	}
 
 	edit := tgbotapi.NewEditMessageText(q.Message.Chat.ID, q.Message.MessageID, text)
@@ -355,7 +416,8 @@ func parseCommand(command, args string) (string, string) {
 func helpText() string {
 	return strings.Join([]string{
 		"<b>Commands</b>",
-		"/start - brief help",
+		"Use the inline buttons or these commands:",
+		"/start - main menu",
 		"/help - this message",
 		"/list - all hosts",
 		"/status - status summary",
@@ -558,28 +620,6 @@ func (b *Bot) formatStats() string {
 	sb.WriteString(fmt.Sprintf("Failed attempts (total): %d\n", total))
 	sb.WriteString(fmt.Sprintf("Monitor uptime: %s\n", uptime))
 	return sb.String()
-}
-
-func (b *Bot) statusKeyboard(activeGroup string) *tgbotapi.InlineKeyboardMarkup {
-	rows := [][]tgbotapi.InlineKeyboardButton{
-		{tgbotapi.NewInlineKeyboardButtonData("All", "status:all")},
-	}
-	for _, g := range b.cache.Groups() {
-		label := "Group: " + g
-		if g == activeGroup {
-			label = "• " + label
-		}
-		rows = append(rows, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData(label, "status:group:"+g),
-		})
-	}
-	for _, h := range b.cache.ListHosts() {
-		rows = append(rows, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData("Device: "+h.Name, "status:host:"+h.Name),
-		})
-	}
-	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	return &markup
 }
 
 func (b *Bot) setNotifyPartial(userID int64, arg string) string {
