@@ -29,6 +29,7 @@ type HostConfig struct {
 	Description        string                 `yaml:"description"`
 	Group              string                 `yaml:"group"`
 	SkipOnPingFailure  bool                   `yaml:"skip_on_ping_failure"`
+	PingFailThreshold  int                    `yaml:"-"`
 	Alerts             HostAlerts             `yaml:"alerts"`
 	Checks             []yaml.Node            `yaml:"checks"`
 	rawChecks          []CheckDefinition
@@ -116,6 +117,8 @@ func (c *Config) validate() error {
 				Raw:  node,
 			})
 		}
+
+		h.resolvePingFailThreshold()
 	}
 
 	return nil
@@ -123,6 +126,25 @@ func (c *Config) validate() error {
 
 func (h *HostConfig) CheckDefinitions() []CheckDefinition {
 	return h.rawChecks
+}
+
+func (h *HostConfig) resolvePingFailThreshold() {
+	h.PingFailThreshold = 1
+	for _, def := range h.rawChecks {
+		if def.Type != "ping" {
+			continue
+		}
+		var cfg struct {
+			FailThreshold int `yaml:"fail_threshold"`
+		}
+		if err := def.Raw.Decode(&cfg); err != nil {
+			continue
+		}
+		if cfg.FailThreshold > 0 {
+			h.PingFailThreshold = cfg.FailThreshold
+		}
+		return
+	}
 }
 
 func ParseDuration(s string, field string) (time.Duration, error) {

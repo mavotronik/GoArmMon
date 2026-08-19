@@ -26,6 +26,7 @@ hosts:
         address: 192.168.1.1
         timeout: 3s
         interval: 5s
+        fail_threshold: 3
       - type: http
         url: http://192.168.1.1/
         method: GET
@@ -67,6 +68,7 @@ hosts:
         address: 192.168.1.69
         timeout: 3s
         interval: 5s
+        fail_threshold: 3
       - type: glances
         url: http://192.168.1.69:61208
         api_version: auto

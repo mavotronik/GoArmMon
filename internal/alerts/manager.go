@@ -17,6 +17,7 @@ const (
 	EventWarning   EventKind = "warning"
 	EventCritical  EventKind = "critical"
 	EventRecovery  EventKind = "recovery"
+	EventPartial   EventKind = "partial"
 )
 
 type Event struct {
@@ -43,13 +44,19 @@ type metricState struct {
 	breachSince time.Time
 }
 
+type availabilityState struct {
+	failStreak int
+}
+
 type Manager struct {
-	mu      sync.Mutex
-	hosts   map[string]config.HostConfig
-	checks  map[string]state.Status
-	metrics map[string]metricState
-	events  chan Event
-	now     func() time.Time
+	mu             sync.Mutex
+	hosts          map[string]config.HostConfig
+	checks         map[string]state.Status
+	metrics        map[string]metricState
+	availability   map[string]availabilityState
+	partialLabels  map[string]string
+	events         chan Event
+	now            func() time.Time
 }
 
 func NewManager(hosts []config.HostConfig, buffer int) *Manager {
@@ -57,11 +64,13 @@ func NewManager(hosts []config.HostConfig, buffer int) *Manager {
 		buffer = 256
 	}
 	m := &Manager{
-		hosts:   make(map[string]config.HostConfig),
-		checks:  make(map[string]state.Status),
-		metrics: make(map[string]metricState),
-		events:  make(chan Event, buffer),
-		now:     time.Now,
+		hosts:         make(map[string]config.HostConfig),
+		checks:        make(map[string]state.Status),
+		metrics:       make(map[string]metricState),
+		availability:  make(map[string]availabilityState),
+		partialLabels: make(map[string]string),
+		events:        make(chan Event, buffer),
+		now:           time.Now,
 	}
 	m.UpdateHosts(hosts)
 	return m
@@ -108,7 +117,7 @@ func (m *Manager) Evaluate(snap state.CheckSnapshot) state.CheckSnapshot {
 
 	switch snap.CheckType {
 	case "ping":
-		effective = m.evalAvailability(snap, oldStatus)
+		effective = m.evalPingAvailability(host, &snap, oldStatus)
 		effective = m.evalRTT(host, snap, effective)
 	case "http":
 		effective = m.evalAvailability(snap, oldStatus)
@@ -127,6 +136,15 @@ func (m *Manager) Evaluate(snap state.CheckSnapshot) state.CheckSnapshot {
 		m.emitTransition(snap, oldStatus, effective)
 	}
 
+	newPartialLabel := state.PartialLabel(snap.PingFailThreshold, snap.PingFails)
+	oldPartialLabel := m.partialLabels[snap.CheckID]
+	if newPartialLabel != oldPartialLabel {
+		if effective != state.StatusOffline {
+			m.emitPartialTransition(snap, oldPartialLabel, newPartialLabel)
+		}
+		m.partialLabels[snap.CheckID] = newPartialLabel
+	}
+
 	m.checks[snap.CheckID] = effective
 	snap.Status = effective
 	return snap
@@ -142,11 +160,41 @@ func (m *Manager) evalAvailability(snap state.CheckSnapshot, old state.Status) s
 	return old
 }
 
+func (m *Manager) evalPingAvailability(host config.HostConfig, snap *state.CheckSnapshot, old state.Status) state.Status {
+	key := snap.CheckID + ":avail"
+	if snap.Status == state.StatusOnline {
+		m.setAvailabilityState(key, availabilityState{})
+		snap.PingFails = 0
+		snap.PingFailThreshold = 0
+		return state.StatusOnline
+	}
+	if snap.Status != state.StatusOffline {
+		return old
+	}
+
+	st := m.availabilityState(key)
+	st.failStreak++
+	m.setAvailabilityState(key, st)
+
+	threshold := host.PingFailThreshold
+	if threshold <= 0 {
+		threshold = 1
+	}
+	if st.failStreak >= threshold {
+		snap.PingFails = 0
+		snap.PingFailThreshold = 0
+		return state.StatusOffline
+	}
+	snap.PingFails = st.failStreak
+	snap.PingFailThreshold = threshold
+	return state.StatusPartial
+}
+
 func (m *Manager) evalRTT(host config.HostConfig, snap state.CheckSnapshot, current state.Status) state.Status {
 	if host.Alerts.RTT == nil || !host.Alerts.RTT.Enabled() {
 		return current
 	}
-	if snap.Status == state.StatusOffline {
+	if current == state.StatusOffline {
 		return state.StatusOffline
 	}
 	value := float64(snap.RTT.Milliseconds())
@@ -281,6 +329,46 @@ func (m *Manager) setMetricState(key string, st metricState) {
 	m.metrics[key] = st
 }
 
+func (m *Manager) availabilityState(key string) availabilityState {
+	return m.availability[key]
+}
+
+func (m *Manager) setAvailabilityState(key string, st availabilityState) {
+	m.availability[key] = st
+}
+
+func (m *Manager) emitPartialTransition(snap state.CheckSnapshot, oldLabel, newLabel string) {
+	if oldLabel == newLabel {
+		return
+	}
+	msg := formatPartialMessage(snap, oldLabel, newLabel)
+	ev := Event{
+		Kind:      EventPartial,
+		HostName:  snap.HostName,
+		CheckType: snap.CheckType,
+		CheckID:   snap.CheckID,
+		OldStatus: snap.Status,
+		NewStatus: snap.Status,
+		Message:   msg,
+		At:        time.Now(),
+	}
+	select {
+	case m.events <- ev:
+	default:
+	}
+}
+
+func formatPartialMessage(snap state.CheckSnapshot, oldLabel, newLabel string) string {
+	switch {
+	case newLabel == "":
+		return fmt.Sprintf("%s/%s: PARTIAL (%s) -> ONLINE", snap.HostName, snap.CheckType, oldLabel)
+	case oldLabel == "":
+		return fmt.Sprintf("%s/%s: ONLINE -> PARTIAL (%s)", snap.HostName, snap.CheckType, newLabel)
+	default:
+		return fmt.Sprintf("%s/%s: PARTIAL (%s) -> PARTIAL (%s)", snap.HostName, snap.CheckType, oldLabel, newLabel)
+	}
+}
+
 func (m *Manager) emitTransition(snap state.CheckSnapshot, oldStatus, newStatus state.Status) {
 	kind := classifyTransition(oldStatus, newStatus)
 	if kind == "" {
@@ -307,6 +395,12 @@ func classifyTransition(old, new state.Status) EventKind {
 		return ""
 	}
 	if old == state.StatusUnknown && new == state.StatusOnline {
+		return ""
+	}
+	if new == state.StatusPartial {
+		return ""
+	}
+	if old == state.StatusPartial && new == state.StatusOnline {
 		return ""
 	}
 	if new == state.StatusOffline {

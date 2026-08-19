@@ -23,6 +23,7 @@ type Bot struct {
 	cfg             config.TelegramConfig
 	cache           *state.Cache
 	allowed         map[int64]struct{}
+	notifyPartial   map[int64]bool
 	stats           *connStats
 	startupNotified bool
 	startupCfgPath  string
@@ -34,10 +35,11 @@ func New(cfg config.TelegramConfig, cache *state.Cache) *Bot {
 		allowed[id] = struct{}{}
 	}
 	return &Bot{
-		cfg:     cfg,
-		cache:   cache,
-		allowed: allowed,
-		stats:   newConnStats(),
+		cfg:           cfg,
+		cache:         cache,
+		allowed:       allowed,
+		notifyPartial: make(map[int64]bool),
+		stats:         newConnStats(),
 	}
 }
 
@@ -231,6 +233,8 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 		text = b.formatGlances()
 	case "stats":
 		text = b.formatStats()
+	case "notify_partial":
+		text = b.setNotifyPartial(update.Message.From.ID, args)
 	default:
 		text = "Unknown command. Use /help."
 	}
@@ -310,7 +314,24 @@ func (b *Bot) request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 
 func (b *Bot) notifyEvent(ev alerts.Event) {
 	text := fmt.Sprintf("<b>%s</b>\n%s\n%s", strings.ToUpper(string(ev.Kind)), ev.Message, ev.At.Format(time.RFC3339))
+	if ev.Kind == alerts.EventPartial {
+		b.sendPartialToSubscribers(text)
+		return
+	}
 	b.sendToAll(text)
+}
+
+func (b *Bot) sendPartialToSubscribers(text string) {
+	for id := range b.allowed {
+		if !b.notifyPartial[id] {
+			continue
+		}
+		msg := tgbotapi.NewMessage(id, text)
+		msg.ParseMode = tgbotapi.ModeHTML
+		if _, err := b.send(msg); err != nil {
+			slog.Warn("telegram notify failed", "user", id, "error", err)
+		}
+	}
 }
 
 func (b *Bot) sendToAll(text string) {
@@ -345,6 +366,7 @@ func helpText() string {
 		"/http - http check results",
 		"/glances - glances summary",
 		"/stats - telegram API stats",
+		"/notify_partial [on|off] - toggle PARTIAL ping notifications (off by default)",
 	}, "\n")
 }
 
@@ -360,7 +382,7 @@ func (b *Bot) formatList() string {
 		if group == "" {
 			group = "-"
 		}
-		sb.WriteString(fmt.Sprintf("• <b>%s</b> [%s] — %s\n", h.Name, group, h.Status))
+		sb.WriteString(fmt.Sprintf("• <b>%s</b> [%s] — %s\n", h.Name, group, h.StatusLabel()))
 		if h.Description != "" {
 			sb.WriteString(fmt.Sprintf("  %s\n", escapeHTML(h.Description)))
 		}
@@ -383,7 +405,7 @@ func (b *Bot) formatStatusHosts(hosts []state.HostView, title string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("<b>%s</b>\n", escapeHTML(title)))
 	for _, h := range hosts {
-		sb.WriteString(fmt.Sprintf("• <b>%s</b>: %s\n", h.Name, h.Status))
+		sb.WriteString(fmt.Sprintf("• <b>%s</b>: %s\n", h.Name, h.StatusLabel()))
 	}
 	return sb.String()
 }
@@ -394,7 +416,7 @@ func (b *Bot) formatHost(name string) string {
 		return fmt.Sprintf("Host %q not found.", name)
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<b>%s</b> — %s\n", h.Name, h.Status))
+	sb.WriteString(fmt.Sprintf("<b>%s</b> — %s\n", h.Name, h.StatusLabel()))
 	if h.Description != "" {
 		sb.WriteString(escapeHTML(h.Description) + "\n")
 	}
@@ -402,7 +424,7 @@ func (b *Bot) formatHost(name string) string {
 		sb.WriteString(fmt.Sprintf("Group: %s\n", escapeHTML(h.Group)))
 	}
 	for _, ch := range h.Checks {
-		sb.WriteString(fmt.Sprintf("\n<b>%s</b>: %s\n", ch.CheckType, ch.Status))
+		sb.WriteString(fmt.Sprintf("\n<b>%s</b>: %s\n", ch.CheckType, ch.StatusLabel()))
 		if ch.Error != "" {
 			sb.WriteString("Error: " + escapeHTML(ch.Error) + "\n")
 		}
@@ -470,7 +492,7 @@ func (b *Bot) formatPing() string {
 	var sb strings.Builder
 	sb.WriteString("<b>Ping</b>\n")
 	for _, s := range snaps {
-		sb.WriteString(fmt.Sprintf("• %s: %s", s.HostName, s.Status))
+		sb.WriteString(fmt.Sprintf("• %s: %s", s.HostName, s.StatusLabel()))
 		if s.Status == state.StatusOnline {
 			sb.WriteString(fmt.Sprintf(" (%s)", s.RTT.Round(time.Millisecond)))
 		}
@@ -558,6 +580,31 @@ func (b *Bot) statusKeyboard(activeGroup string) *tgbotapi.InlineKeyboardMarkup 
 	}
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &markup
+}
+
+func (b *Bot) setNotifyPartial(userID int64, arg string) string {
+	arg = strings.ToLower(strings.TrimSpace(arg))
+	switch arg {
+	case "":
+		if b.notifyPartial[userID] {
+			return "PARTIAL ping notifications: <b>on</b>\nUse /notify_partial off to disable."
+		}
+		return "PARTIAL ping notifications: <b>off</b> (default)\nUse /notify_partial on to enable."
+	case "on", "enable", "1", "true":
+		b.notifyPartial[userID] = true
+		return "PARTIAL ping notifications: <b>on</b>"
+	case "off", "disable", "0", "false":
+		b.notifyPartial[userID] = false
+		return "PARTIAL ping notifications: <b>off</b>"
+	case "toggle":
+		b.notifyPartial[userID] = !b.notifyPartial[userID]
+		if b.notifyPartial[userID] {
+			return "PARTIAL ping notifications: <b>on</b>"
+		}
+		return "PARTIAL ping notifications: <b>off</b>"
+	default:
+		return "Usage: /notify_partial [on|off|toggle]"
+	}
 }
 
 func escapeHTML(s string) string {

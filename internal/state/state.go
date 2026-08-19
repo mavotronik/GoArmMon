@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ type Status string
 const (
 	StatusUnknown  Status = "UNKNOWN"
 	StatusOnline   Status = "ONLINE"
+	StatusPartial  Status = "PARTIAL"
 	StatusOffline  Status = "OFFLINE"
 	StatusWarning  Status = "WARNING"
 	StatusCritical Status = "CRITICAL"
@@ -19,9 +21,10 @@ const (
 var statusRank = map[Status]int{
 	StatusUnknown:  0,
 	StatusOnline:   1,
-	StatusWarning:  2,
-	StatusOffline:  3,
-	StatusCritical: 4,
+	StatusPartial:  2,
+	StatusWarning:  3,
+	StatusOffline:  4,
+	StatusCritical: 5,
 }
 
 func WorstStatus(a, b Status) Status {
@@ -63,17 +66,19 @@ type GlancesData struct {
 }
 
 type CheckSnapshot struct {
-	HostName     string
-	CheckType    string
-	CheckID      string
-	Status       Status
-	UpdatedAt    time.Time
-	Error        string
-	RTT          time.Duration
-	HTTPCode     int
-	HTTPDuration time.Duration
-	Glances      *GlancesData
-	Skipped      bool
+	HostName          string
+	CheckType         string
+	CheckID           string
+	Status            Status
+	UpdatedAt         time.Time
+	Error             string
+	RTT               time.Duration
+	HTTPCode          int
+	HTTPDuration      time.Duration
+	Glances           *GlancesData
+	Skipped           bool
+	PingFails         int
+	PingFailThreshold int
 }
 
 type HostView struct {
@@ -82,6 +87,34 @@ type HostView struct {
 	Group       string
 	Status      Status
 	Checks      []CheckSnapshot
+}
+
+func PartialLabel(threshold, fails int) string {
+	if threshold <= 0 || fails <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d", threshold, fails)
+}
+
+func (s CheckSnapshot) StatusLabel() string {
+	if s.Status == StatusPartial {
+		if label := PartialLabel(s.PingFailThreshold, s.PingFails); label != "" {
+			return "PARTIAL (" + label + ")"
+		}
+	}
+	return string(s.Status)
+}
+
+func (h HostView) StatusLabel() string {
+	if h.Status != StatusPartial {
+		return string(h.Status)
+	}
+	for _, ch := range h.Checks {
+		if ch.Status == StatusPartial {
+			return ch.StatusLabel()
+		}
+	}
+	return string(h.Status)
 }
 
 type Cache struct {
