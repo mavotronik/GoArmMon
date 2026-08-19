@@ -26,6 +26,7 @@ type Engine struct {
 	bot     *telegram.Bot
 	mu      sync.Mutex
 	cfg     *config.Config
+	runCtx  context.Context
 }
 
 func NewEngine(cfgPath string) *Engine {
@@ -57,6 +58,8 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	e.runCtx = ctx
+	bot.SetConfigStore(e, ctx)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -95,4 +98,62 @@ func (e *Engine) onConfigReload(ctx context.Context, cfg *config.Config) {
 	e.cfg = cfg
 	e.bot.UpdateConfig(cfg.Telegram)
 	e.sched.ApplyConfig(ctx, cfg)
+}
+
+func (e *Engine) HostConfigs() []config.HostConfig {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cfg == nil {
+		return nil
+	}
+	out := make([]config.HostConfig, len(e.cfg.Hosts))
+	copy(out, e.cfg.Hosts)
+	return out
+}
+
+func (e *Engine) HostConfig(name string) (config.HostConfig, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cfg == nil {
+		return config.HostConfig{}, false
+	}
+	for _, h := range e.cfg.Hosts {
+		if h.Name == name {
+			return h, true
+		}
+	}
+	return config.HostConfig{}, false
+}
+
+func (e *Engine) MutateConfig(fn func(*config.Config) error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.cfg == nil {
+		return fmt.Errorf("config not loaded")
+	}
+
+	clone, err := config.Clone(e.cfg)
+	if err != nil {
+		return fmt.Errorf("clone config: %w", err)
+	}
+	if err := fn(clone); err != nil {
+		return err
+	}
+	if err := config.Save(e.cfgPath, clone); err != nil {
+		return err
+	}
+
+	ctx := e.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := e.log.Configure(clone.Logging.Level, clone.Logging.File); err != nil {
+		slog.Warn("logger reconfigure failed", "error", err)
+	}
+	e.cfg = clone
+	e.bot.UpdateConfig(clone.Telegram)
+	e.sched.ApplyConfig(ctx, clone)
+	return nil
 }

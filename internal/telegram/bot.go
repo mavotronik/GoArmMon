@@ -27,6 +27,9 @@ type Bot struct {
 	stats           *connStats
 	startupNotified bool
 	startupCfgPath  string
+	store           ConfigStore
+	runCtx          context.Context
+	hostEdit        *hostEditor
 }
 
 func New(cfg config.TelegramConfig, cache *state.Cache) *Bot {
@@ -40,6 +43,7 @@ func New(cfg config.TelegramConfig, cache *state.Cache) *Bot {
 		allowed:       allowed,
 		notifyPartial: make(map[int64]bool),
 		stats:         newConnStats(),
+		hostEdit:      newHostEditor(),
 	}
 }
 
@@ -195,6 +199,11 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 		return
 	}
 	if update.Message == nil || !update.Message.IsCommand() {
+		if update.Message != nil && b.allowedUser(update.Message.From.ID) {
+			if b.handleHostTextInput(update.Message) {
+				return
+			}
+		}
 		return
 	}
 	if !b.allowedUser(update.Message.From.ID) {
@@ -226,7 +235,7 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 			markup = b.hostsMenuKeyboard()
 		} else {
 			text = b.formatHost(args)
-			markup = hostDetailKeyboard(args)
+			markup = b.hostDetailKeyboard(args)
 		}
 	case "alerts":
 		text = b.formatAlerts()
@@ -249,6 +258,9 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	case "notify_partial":
 		text = settingsText(b.setNotifyPartial(userID, args))
 		markup = b.settingsMenuKeyboard(userID)
+	case "cancel":
+		text = b.cancelHostEdit(userID)
+		markup = mainMenuKeyboard()
 	default:
 		text = "Unknown command. Use /help."
 		markup = mainMenuKeyboard()
@@ -324,10 +336,14 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 	case strings.HasPrefix(data, cbStatusHost):
 		host := strings.TrimPrefix(data, cbStatusHost)
 		text = b.formatHost(host)
-		markup = hostDetailKeyboard(host)
+		markup = b.hostDetailKeyboard(host)
 	default:
-		text = "Unknown action"
-		markup = mainMenuKeyboard()
+		var handled bool
+		text, markup, handled = b.handleHostCallback(data, userID, q.Message.Chat.ID, q.Message.MessageID)
+		if !handled {
+			text = "Unknown action"
+			markup = mainMenuKeyboard()
+		}
 	}
 
 	edit := tgbotapi.NewEditMessageText(q.Message.Chat.ID, q.Message.MessageID, text)
@@ -429,6 +445,10 @@ func helpText() string {
 		"/glances - glances summary",
 		"/stats - telegram API stats",
 		"/notify_partial [on|off] - toggle PARTIAL ping notifications (off by default)",
+		"",
+		"<b>Host management</b>",
+		"Hosts menu → Add host / Manage",
+		"/cancel - cancel current host edit",
 	}, "\n")
 }
 
