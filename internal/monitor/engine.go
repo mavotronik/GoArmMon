@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 
+	"goarmmon/internal/acl"
 	"goarmmon/internal/alerts"
 	"goarmmon/internal/config"
 	"goarmmon/internal/logger"
@@ -24,6 +25,7 @@ type Engine struct {
 	alerts  *alerts.Manager
 	sched   *scheduler.Scheduler
 	bot     *telegram.Bot
+	acl     *acl.Store
 	mu      sync.Mutex
 	cfg     *config.Config
 	runCtx  context.Context
@@ -52,8 +54,17 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.alerts = alerts.NewManager(cfg.Hosts, 256)
 	e.sched = scheduler.New(e.cache, e.alerts)
 
+	dbFile := config.ACLDBFile(config.ResolveDBDir(e.cfgPath, cfg.Telegram.DBPath))
+	aclStore, err := acl.Open(dbFile, cfg.Telegram.PrimaryRoot(), cfg.Telegram.AllowedUsers[1:])
+	if err != nil {
+		return fmt.Errorf("acl: %w", err)
+	}
+	e.acl = aclStore
+	defer aclStore.Close()
+
 	bot := telegram.New(cfg.Telegram, e.cache)
 	e.bot = bot
+	bot.SetACL(aclStore)
 	bot.SetStartupConfigPath(e.cfgPath)
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -80,7 +91,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		return fmt.Errorf("config watch: %w", err)
 	}
 
-	slog.Info("monitor started", "config", e.cfgPath)
+	slog.Info("monitor started", "config", e.cfgPath, "acl_db", dbFile, "root", cfg.Telegram.PrimaryRoot())
 	e.bot.Run(ctx, e.alerts.Events())
 
 	e.sched.Stop()

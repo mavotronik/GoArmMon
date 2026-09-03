@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"goarmmon/internal/acl"
 	"goarmmon/internal/config"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -21,6 +22,8 @@ const (
 	cbHostManage   = "host:manage"
 	cbHostEdit     = "hedit:"
 	cbHostField    = "hfield:"
+	cbHostGeneral  = "hgen:"
+	cbHostMsg      = "hmsg:"
 	cbHostCheck    = "hcheck:"
 	cbHostCheckAdd = "hckadd:"
 	cbHostCheckRm  = "hckrm:"
@@ -83,6 +86,9 @@ func (b *Bot) SetConfigStore(store ConfigStore, ctx context.Context) {
 	if b.hostEdit == nil {
 		b.hostEdit = newHostEditor()
 	}
+	if b.userEdit == nil {
+		b.userEdit = newUserEditor()
+	}
 }
 
 func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messageID int) (text string, markup *tgbotapi.InlineKeyboardMarkup, handled bool) {
@@ -92,14 +98,24 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 
 	switch {
 	case data == cbHostAdd:
+		if text, markup, denied := b.denyUnlessCanAdd(userID); denied {
+			return text, markup, true
+		}
 		b.hostEdit.set(userID, &editSession{mode: "add_name"})
 		return "<b>Add host</b>\nSend the host name:", nil, true
 	case data == cbHostManage:
-		return b.formatHostManageList(), b.hostManageListKeyboard(), true
+		if !b.canAddHost(userID) && !b.hasEditableHosts(userID) {
+			b.logDenied(userID, "host:manage", "")
+			return "Access denied.", b.hostsMenuKeyboard(userID), true
+		}
+		return b.formatHostManageList(userID), b.hostManageListKeyboard(userID), true
 	case strings.HasPrefix(data, cbHostEditFrom):
 		idx, ok := parseIdx(strings.TrimPrefix(data, cbHostEditFrom))
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
 		}
 		return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx), true
 	case strings.HasPrefix(data, cbHostEdit):
@@ -107,11 +123,31 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
 		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
 		return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx), true
+	case strings.HasPrefix(data, cbHostDelYes):
+		idx, ok := parseIdx(strings.TrimPrefix(data, cbHostDelYes))
+		if !ok {
+			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
+		err := b.deleteHost(idx)
+		if err != nil {
+			return fmt.Sprintf("Delete failed: %s", escapeHTML(err.Error())), b.hostManageListKeyboard(userID), true
+		}
+		b.hostEdit.clear(userID)
+		return "<b>Host deleted.</b>\n\n" + b.formatHostManageList(userID), b.hostManageListKeyboard(userID), true
 	case strings.HasPrefix(data, cbHostDelNo):
 		idx, ok := parseIdx(strings.TrimPrefix(data, cbHostDelNo))
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
 		}
 		return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx), true
 	case strings.HasPrefix(data, cbHostDel):
@@ -119,23 +155,15 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
 		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
 		hosts := b.store.HostConfigs()
 		if idx < 0 || idx >= len(hosts) {
-			return "Host not found.", b.hostManageListKeyboard(), true
+			return "Host not found.", b.hostManageListKeyboard(userID), true
 		}
 		return fmt.Sprintf("<b>Delete host?</b>\n\nHost: <b>%s</b>\nThis cannot be undone.", escapeHTML(hosts[idx].Name)),
 			b.hostDeleteConfirmKeyboard(idx), true
-	case strings.HasPrefix(data, cbHostDelYes):
-		idx, ok := parseIdx(strings.TrimPrefix(data, cbHostDelYes))
-		if !ok {
-			return "Invalid host.", mainMenuKeyboard(), true
-		}
-		err := b.deleteHost(idx)
-		if err != nil {
-			return fmt.Sprintf("Delete failed: %s", escapeHTML(err.Error())), b.hostManageListKeyboard(), true
-		}
-		b.hostEdit.clear(userID)
-		return "<b>Host deleted.</b>\n\n" + b.formatHostManageList(), b.hostManageListKeyboard(), true
 	case strings.HasPrefix(data, cbHostCheckAdd):
 		rest := strings.TrimPrefix(data, cbHostCheckAdd)
 		parts := strings.SplitN(rest, ":", 2)
@@ -145,6 +173,9 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		idx, ok := parseIdx(parts[0])
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
 		}
 		checkType := parts[1]
 		err := b.addCheck(idx, checkType)
@@ -162,12 +193,15 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
 		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
 		checkType := parts[1]
 		err := b.removeCheck(idx, checkType)
 		if err != nil {
-			return fmt.Sprintf("Failed: %s", escapeHTML(err.Error())), b.hostManageCardKeyboard(idx), true
+			return fmt.Sprintf("Failed: %s", escapeHTML(err.Error())), b.hostChecksMenuKeyboard(idx), true
 		}
-		return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx), true
+		return b.formatHostChecksMenu(idx), b.hostChecksMenuKeyboard(idx), true
 	case strings.HasPrefix(data, cbHostCheck):
 		rest := strings.TrimPrefix(data, cbHostCheck)
 		parts := strings.SplitN(rest, ":", 2)
@@ -178,11 +212,42 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
 		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
 		checkType := parts[1]
 		if checkType == "menu" {
-			return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx), true
+			return b.formatHostChecksMenu(idx), b.hostChecksMenuKeyboard(idx), true
 		}
 		return b.formatHostCheckSection(idx, checkType), b.hostCheckKeyboard(idx, checkType), true
+	case strings.HasPrefix(data, cbHostGeneral):
+		rest := strings.TrimPrefix(data, cbHostGeneral)
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 || parts[1] != "menu" {
+			return "Invalid action.", mainMenuKeyboard(), true
+		}
+		idx, ok := parseIdx(parts[0])
+		if !ok {
+			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
+		return b.formatHostGeneralMenu(idx), b.hostGeneralMenuKeyboard(idx), true
+	case strings.HasPrefix(data, cbHostMsg):
+		rest := strings.TrimPrefix(data, cbHostMsg)
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 || parts[1] != "menu" {
+			return "Invalid action.", mainMenuKeyboard(), true
+		}
+		idx, ok := parseIdx(parts[0])
+		if !ok {
+			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
+		return b.formatHostMessagesMenu(idx), b.hostMessagesMenuKeyboard(idx), true
 	case strings.HasPrefix(data, cbHostAlertDis):
 		rest := strings.TrimPrefix(data, cbHostAlertDis)
 		parts := strings.SplitN(rest, ":", 2)
@@ -192,6 +257,9 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		idx, ok := parseIdx(parts[0])
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
 		}
 		alertKey := parts[1]
 		err := b.disableAlert(idx, alertKey)
@@ -209,6 +277,9 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
 		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
 		alertKey, fieldKey := parts[1], parts[2]
 		fieldPath := fmt.Sprintf("alerts.%s.%s", alertKey, fieldKey)
 		b.hostEdit.set(userID, &editSession{mode: "field", hostIdx: idx, field: fieldPath})
@@ -224,9 +295,12 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
 		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
 		alertKey := parts[1]
 		if alertKey == "menu" {
-			return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx), true
+			return b.formatHostAlertsMenu(idx), b.hostAlertsMenuKeyboard(idx), true
 		}
 		if alertKey == "for" {
 			b.hostEdit.set(userID, &editSession{mode: "field", hostIdx: idx, field: "alerts.for"})
@@ -243,12 +317,17 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
 		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
+		}
 		field := parts[1]
 		err := b.toggleField(idx, field)
 		if err != nil {
-			return fmt.Sprintf("Failed: %s", escapeHTML(err.Error())), b.hostManageCardKeyboard(idx), true
+			_, markup := b.returnScreenForToggle(idx, field)
+			return fmt.Sprintf("Failed: %s", escapeHTML(err.Error())), markup, true
 		}
-		return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx), true
+		text, markup := b.returnScreenForToggle(idx, field)
+		return text, markup, true
 	case strings.HasPrefix(data, cbHostField):
 		rest := strings.TrimPrefix(data, cbHostField)
 		parts := strings.SplitN(rest, ":", 2)
@@ -258,6 +337,9 @@ func (b *Bot) handleHostCallback(data string, userID int64, chatID int64, messag
 		idx, ok := parseIdx(parts[0])
 		if !ok {
 			return "Invalid host.", mainMenuKeyboard(), true
+		}
+		if text, markup, denied := b.denyUnlessCanEditIdx(userID, idx); denied {
+			return text, markup, true
 		}
 		fieldPath := parts[1]
 		b.hostEdit.set(userID, &editSession{mode: "field", hostIdx: idx, field: fieldPath})
@@ -284,6 +366,12 @@ func (b *Bot) handleHostTextInput(msg *tgbotapi.Message) bool {
 
 	switch s.mode {
 	case "add_name":
+		if !b.canAddHost(userID) {
+			b.hostEdit.clear(userID)
+			b.logDenied(userID, "host:add", "")
+			b.replyPlain(msg.Chat.ID, "Access denied.")
+			return true
+		}
 		if err := validateHostName(text); err != nil {
 			b.replyPlain(msg.Chat.ID, err.Error()+"\nTry again or /cancel.")
 			return true
@@ -305,6 +393,11 @@ func (b *Bot) handleHostTextInput(msg *tgbotapi.Message) bool {
 			b.replyPlain(msg.Chat.ID, fmt.Sprintf("Failed to add host: %s", err.Error()))
 			return true
 		}
+		if b.acl != nil && b.roleOf(userID) == acl.RoleLimitedAdmin {
+			if ownErr := b.acl.SetOwner(text, userID); ownErr != nil {
+				slog.Warn("acl set owner failed", "host", text, "user_id", userID, "error", ownErr)
+			}
+		}
 		reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("<b>Host added</b>\n\n%s", b.formatHostManageCard(idx)))
 		reply.ParseMode = tgbotapi.ModeHTML
 		reply.ReplyMarkup = b.hostManageCardKeyboard(idx)
@@ -314,15 +407,21 @@ func (b *Bot) handleHostTextInput(msg *tgbotapi.Message) bool {
 		return true
 
 	case "field":
+		if text, _, denied := b.denyUnlessCanEditIdx(userID, s.hostIdx); denied {
+			b.hostEdit.clear(userID)
+			b.replyPlain(msg.Chat.ID, text)
+			return true
+		}
 		err := b.applyFieldEdit(s.hostIdx, s.field, text)
 		if err != nil {
 			b.replyPlain(msg.Chat.ID, fmt.Sprintf("Invalid value: %s\nTry again or /cancel.", err.Error()))
 			return true
 		}
 		b.hostEdit.clear(userID)
-		reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("<b>Saved</b>\n\n%s", b.formatHostManageCard(s.hostIdx)))
+		text, markup := b.returnScreenForField(s.hostIdx, s.field)
+		reply := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("<b>Saved</b>\n\n%s", text))
 		reply.ParseMode = tgbotapi.ModeHTML
-		reply.ReplyMarkup = b.hostManageCardKeyboard(s.hostIdx)
+		reply.ReplyMarkup = markup
 		if _, err := b.send(reply); err != nil {
 			slogWarnSend(err)
 		}
@@ -333,6 +432,9 @@ func (b *Bot) handleHostTextInput(msg *tgbotapi.Message) bool {
 
 func (b *Bot) cancelHostEdit(userID int64) string {
 	b.hostEdit.clear(userID)
+	if b.userEdit != nil {
+		b.userEdit.clear(userID)
+	}
 	return "Edit cancelled."
 }
 
@@ -406,13 +508,24 @@ func parseBoolInput(s string) (bool, error) {
 }
 
 func (b *Bot) deleteHost(idx int) error {
-	return b.store.MutateConfig(func(cfg *config.Config) error {
+	var name string
+	err := b.store.MutateConfig(func(cfg *config.Config) error {
 		if idx < 0 || idx >= len(cfg.Hosts) {
 			return fmt.Errorf("host not found")
 		}
+		name = cfg.Hosts[idx].Name
 		cfg.Hosts = append(cfg.Hosts[:idx], cfg.Hosts[idx+1:]...)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if b.acl != nil && name != "" {
+		if delErr := b.acl.DeleteHost(name); delErr != nil {
+			slog.Warn("acl delete host failed", "host", name, "error", delErr)
+		}
+	}
+	return nil
 }
 
 func (b *Bot) addCheck(idx int, checkType string) error {
@@ -508,13 +621,28 @@ func (b *Bot) disableAlert(idx int, alertKey string) error {
 }
 
 func (b *Bot) applyFieldEdit(idx int, fieldPath, value string) error {
-	return b.store.MutateConfig(func(cfg *config.Config) error {
+	var oldName, newName string
+	err := b.store.MutateConfig(func(cfg *config.Config) error {
 		h, ok := cfg.HostByIndex(idx)
 		if !ok {
 			return fmt.Errorf("host not found")
 		}
-		return applyFieldValue(h, cfg, idx, fieldPath, value)
+		oldName = h.Name
+		if err := applyFieldValue(h, cfg, idx, fieldPath, value); err != nil {
+			return err
+		}
+		newName = h.Name
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if b.acl != nil && fieldPath == "name" && oldName != "" && newName != "" && oldName != newName {
+		if renErr := b.acl.RenameHost(oldName, newName); renErr != nil {
+			slog.Warn("acl rename host failed", "old", oldName, "new", newName, "error", renErr)
+		}
+	}
+	return nil
 }
 
 func applyFieldValue(h *config.HostConfig, cfg *config.Config, idx int, fieldPath, value string) error {
@@ -1005,19 +1133,27 @@ func ptrFloat(f *float64) string {
 	return strconv.FormatFloat(*f, 'f', -1, 64)
 }
 
-func (b *Bot) formatHostManageList() string {
+func (b *Bot) formatHostManageList(userID int64) string {
 	hosts := b.store.HostConfigs()
 	if len(hosts) == 0 {
 		return "<b>Manage hosts</b>\nNo hosts configured."
 	}
 	var sb strings.Builder
 	sb.WriteString("<b>Manage hosts</b>\nSelect a host to edit:\n")
-	for i, h := range hosts {
-		sb.WriteString(fmt.Sprintf("%d. <b>%s</b>", i+1, escapeHTML(h.Name)))
+	n := 0
+	for _, h := range hosts {
+		if !b.canEditHost(userID, h.Name) {
+			continue
+		}
+		n++
+		sb.WriteString(fmt.Sprintf("%d. <b>%s</b>", n, escapeHTML(h.Name)))
 		if h.Group != "" {
 			sb.WriteString(fmt.Sprintf(" [%s]", escapeHTML(h.Group)))
 		}
 		sb.WriteString("\n")
+	}
+	if n == 0 {
+		sb.WriteString("No hosts you can edit.")
 	}
 	return sb.String()
 }
@@ -1036,15 +1172,151 @@ func (b *Bot) formatHostManageCard(idx int) string {
 	if h.Group != "" {
 		sb.WriteString(fmt.Sprintf("Group: %s\n", escapeHTML(h.Group)))
 	}
-	sb.WriteString(fmt.Sprintf("skip_on_ping_failure: %v\n", h.SkipOnPingFailure))
-	if kinds := h.Messages.ConfiguredKinds(); len(kinds) > 0 {
-		sb.WriteString("Messages: " + strings.Join(kinds, ", ") + "\n")
-	} else {
-		sb.WriteString("Messages: default\n")
-	}
 	sb.WriteString("\n<b>Checks:</b> " + strings.Join(config.ListCheckTypes(h), ", ") + "\n")
-	sb.WriteString("\nUse buttons below to edit sections.")
+	sb.WriteString("\nChoose a section to edit.")
 	return sb.String()
+}
+
+func (b *Bot) formatHostGeneralMenu(idx int) string {
+	hosts := b.store.HostConfigs()
+	if idx < 0 || idx >= len(hosts) {
+		return "Host not found."
+	}
+	h := hosts[idx]
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>General</b> — %s\n\n", escapeHTML(h.Name)))
+	sb.WriteString(fmt.Sprintf("Name: %s\n", escapeHTML(h.Name)))
+	if h.Description != "" {
+		sb.WriteString(fmt.Sprintf("Description: %s\n", escapeHTML(h.Description)))
+	}
+	if h.Group != "" {
+		sb.WriteString(fmt.Sprintf("Group: %s\n", escapeHTML(h.Group)))
+	}
+	sb.WriteString(fmt.Sprintf("skip_on_ping_failure: %v\n", h.SkipOnPingFailure))
+	return sb.String()
+}
+
+func (b *Bot) formatHostChecksMenu(idx int) string {
+	hosts := b.store.HostConfigs()
+	if idx < 0 || idx >= len(hosts) {
+		return "Host not found."
+	}
+	h := hosts[idx]
+	checks := config.ListCheckTypes(h)
+	if len(checks) == 0 {
+		return fmt.Sprintf("<b>Checks</b> — %s\n\nNo checks configured.", escapeHTML(h.Name))
+	}
+	return fmt.Sprintf("<b>Checks</b> — %s\n\n%s", escapeHTML(h.Name), strings.Join(checks, ", "))
+}
+
+func hostAlertApplicable(h config.HostConfig, alertKey string) bool {
+	switch alertKey {
+	case "rtt":
+		return config.HasCheck(h, "ping")
+	case "http_response":
+		return config.HasCheck(h, "http")
+	case "cpu", "ram", "swap", "disk":
+		return config.HasCheck(h, "glances")
+	default:
+		return false
+	}
+}
+
+func (b *Bot) formatHostAlertsMenu(idx int) string {
+	hosts := b.store.HostConfigs()
+	if idx < 0 || idx >= len(hosts) {
+		return "Host not found."
+	}
+	h := hosts[idx]
+	var configured []string
+	if h.Alerts.RTT != nil && hostAlertApplicable(h, "rtt") {
+		configured = append(configured, "rtt")
+	}
+	if h.Alerts.HTTPResponse != nil && hostAlertApplicable(h, "http_response") {
+		configured = append(configured, "http_response")
+	}
+	if h.Alerts.CPU != nil && hostAlertApplicable(h, "cpu") {
+		configured = append(configured, "cpu")
+	}
+	if h.Alerts.RAM != nil && hostAlertApplicable(h, "ram") {
+		configured = append(configured, "ram")
+	}
+	if h.Alerts.Swap != nil && hostAlertApplicable(h, "swap") {
+		configured = append(configured, "swap")
+	}
+	if h.Alerts.Disk != nil && hostAlertApplicable(h, "disk") {
+		configured = append(configured, "disk")
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Alerts</b> — %s\n\n", escapeHTML(h.Name)))
+	if h.Alerts.For != nil {
+		sb.WriteString(fmt.Sprintf("Default for: %s\n", escapeHTML(*h.Alerts.For)))
+	}
+	if len(configured) == 0 {
+		sb.WriteString("No per-metric alerts configured.")
+	} else {
+		sb.WriteString("Configured: " + strings.Join(configured, ", "))
+	}
+	return sb.String()
+}
+
+func (b *Bot) formatHostMessagesMenu(idx int) string {
+	hosts := b.store.HostConfigs()
+	if idx < 0 || idx >= len(hosts) {
+		return "Host not found."
+	}
+	h := hosts[idx]
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Messages</b> — %s\n\n", escapeHTML(h.Name)))
+	if kinds := h.Messages.ConfiguredKinds(); len(kinds) > 0 {
+		sb.WriteString("Configured: " + strings.Join(kinds, ", "))
+	} else {
+		sb.WriteString("Using defaults.")
+	}
+	return sb.String()
+}
+
+func (b *Bot) returnScreenForField(idx int, fieldPath string) (string, *tgbotapi.InlineKeyboardMarkup) {
+	switch fieldPath {
+	case "name", "description", "group":
+		return b.formatHostGeneralMenu(idx), b.hostGeneralMenuKeyboard(idx)
+	case "alerts.for":
+		return b.formatHostAlertsMenu(idx), b.hostAlertsMenuKeyboard(idx)
+	}
+	if strings.HasPrefix(fieldPath, "messages.") {
+		return b.formatHostMessagesMenu(idx), b.hostMessagesMenuKeyboard(idx)
+	}
+	if strings.HasPrefix(fieldPath, "checks.") {
+		parts := strings.SplitN(fieldPath, ".", 3)
+		if len(parts) >= 2 {
+			checkType := parts[1]
+			return b.formatHostCheckSection(idx, checkType), b.hostCheckKeyboard(idx, checkType)
+		}
+	}
+	if strings.HasPrefix(fieldPath, "alerts.") {
+		parts := strings.Split(fieldPath, ".")
+		if len(parts) >= 2 {
+			alertKey := parts[1]
+			if alertKey == "disk" && len(parts) == 3 && (parts[2] == "ignore_devices" || parts[2] == "ignore_mounts") {
+				return b.formatHostAlertSection(idx, "disk"), b.hostAlertKeyboard(idx, "disk")
+			}
+			if alertKey != "for" {
+				return b.formatHostAlertSection(idx, alertKey), b.hostAlertKeyboard(idx, alertKey)
+			}
+		}
+	}
+	return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx)
+}
+
+func (b *Bot) returnScreenForToggle(idx int, field string) (string, *tgbotapi.InlineKeyboardMarkup) {
+	switch field {
+	case "skip_on_ping_failure":
+		return b.formatHostGeneralMenu(idx), b.hostGeneralMenuKeyboard(idx)
+	case "checks.http.follow_redirects":
+		return b.formatHostCheckSection(idx, "http"), b.hostCheckKeyboard(idx, "http")
+	default:
+		return b.formatHostManageCard(idx), b.hostManageCardKeyboard(idx)
+	}
 }
 
 func (b *Bot) formatHostCheckSection(idx int, checkType string) string {

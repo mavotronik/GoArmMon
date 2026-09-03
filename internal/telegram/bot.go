@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"goarmmon/internal/acl"
 	"goarmmon/internal/alerts"
 	"goarmmon/internal/config"
 	"goarmmon/internal/state"
@@ -28,8 +29,10 @@ type Bot struct {
 	startupNotified bool
 	startupCfgPath  string
 	store           ConfigStore
+	acl             *acl.Store
 	runCtx          context.Context
 	hostEdit        *hostEditor
+	userEdit        *userEditor
 }
 
 func New(cfg config.TelegramConfig, cache *state.Cache) *Bot {
@@ -44,6 +47,7 @@ func New(cfg config.TelegramConfig, cache *state.Cache) *Bot {
 		notifyPartial: make(map[int64]bool),
 		stats:         newConnStats(),
 		hostEdit:      newHostEditor(),
+		userEdit:      newUserEditor(),
 	}
 }
 
@@ -185,28 +189,39 @@ func (b *Bot) updatesChannel() tgbotapi.UpdatesChannel {
 	return api.GetUpdatesChan(u)
 }
 
-func (b *Bot) allowedUser(id int64) bool {
-	_, ok := b.allowed[id]
-	return ok
-}
-
 func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	if update.CallbackQuery != nil {
-		if !b.allowedUser(update.CallbackQuery.From.ID) {
+		from := update.CallbackQuery.From
+		b.logRequest(from, "callback", update.CallbackQuery.Data)
+		if from == nil || !b.allowedUser(from.ID) {
 			return
 		}
 		b.handleCallback(update.CallbackQuery)
 		return
 	}
-	if update.Message == nil || !update.Message.IsCommand() {
-		if update.Message != nil && b.allowedUser(update.Message.From.ID) {
+	if update.Message == nil {
+		return
+	}
+	from := update.Message.From
+	if from == nil {
+		return
+	}
+	if !update.Message.IsCommand() {
+		if b.allowedUser(from.ID) {
+			if mode := b.pendingInputMode(from.ID); mode != "" {
+				b.logRequest(from, "text", mode)
+			}
+			if b.handleUserTextInput(update.Message) {
+				return
+			}
 			if b.handleHostTextInput(update.Message) {
 				return
 			}
 		}
 		return
 	}
-	if !b.allowedUser(update.Message.From.ID) {
+	b.logRequest(from, "command", "/"+update.Message.Command())
+	if !b.allowedUser(from.ID) {
 		return
 	}
 
@@ -214,7 +229,7 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	var text string
 	var markup *tgbotapi.InlineKeyboardMarkup
 
-	userID := update.Message.From.ID
+	userID := from.ID
 
 	switch cmd {
 	case "start":
@@ -224,33 +239,33 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 		text = helpText()
 		markup = mainMenuKeyboard()
 	case "list":
-		text = b.formatList()
+		text = b.formatList(userID)
 		markup = actionKeyboard("list")
 	case "status":
-		text = b.formatStatusAll()
-		markup = b.statusMenuKeyboard("")
+		text = b.formatStatusAll(userID)
+		markup = b.statusMenuKeyboard(userID, "")
 	case "host":
 		if args == "" {
 			text = "Choose a host from the menu."
-			markup = b.hostsMenuKeyboard()
+			markup = b.hostsMenuKeyboard(userID)
 		} else {
-			text = b.formatHost(args)
-			markup = b.hostDetailKeyboard(args)
+			text = b.formatHost(userID, args)
+			markup = b.hostDetailKeyboard(userID, args)
 		}
 	case "alerts":
-		text = b.formatAlerts()
+		text = b.formatAlerts(userID)
 		markup = actionKeyboard("alerts")
 	case "uptime":
-		text = b.formatUptime()
+		text = b.formatUptime(userID)
 		markup = actionKeyboard("uptime")
 	case "ping":
-		text = b.formatPing()
+		text = b.formatPing(userID)
 		markup = actionKeyboard("ping")
 	case "http":
-		text = b.formatHTTP()
+		text = b.formatHTTP(userID)
 		markup = actionKeyboard("http")
 	case "glances":
-		text = b.formatGlances()
+		text = b.formatGlances(userID)
 		markup = actionKeyboard("glances")
 	case "stats":
 		text = b.formatStats()
@@ -287,11 +302,11 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 		text = menuTitle("main")
 		markup = mainMenuKeyboard()
 	case data == cbMenuStatus:
-		text = b.formatStatusAll()
-		markup = b.statusMenuKeyboard("")
+		text = b.formatStatusAll(userID)
+		markup = b.statusMenuKeyboard(userID, "")
 	case data == cbMenuHosts:
 		text = menuTitle("hosts")
-		markup = b.hostsMenuKeyboard()
+		markup = b.hostsMenuKeyboard(userID)
 	case data == cbMenuChecks:
 		text = menuTitle("checks")
 		markup = checksMenuKeyboard()
@@ -299,22 +314,22 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 		text = settingsText("")
 		markup = b.settingsMenuKeyboard(userID)
 	case data == cbActionList:
-		text = b.formatList()
+		text = b.formatList(userID)
 		markup = actionKeyboard("list")
 	case data == cbActionAlerts:
-		text = b.formatAlerts()
+		text = b.formatAlerts(userID)
 		markup = actionKeyboard("alerts")
 	case data == cbActionPing:
-		text = b.formatPing()
+		text = b.formatPing(userID)
 		markup = actionKeyboard("ping")
 	case data == cbActionHTTP:
-		text = b.formatHTTP()
+		text = b.formatHTTP(userID)
 		markup = actionKeyboard("http")
 	case data == cbActionGlances:
-		text = b.formatGlances()
+		text = b.formatGlances(userID)
 		markup = actionKeyboard("glances")
 	case data == cbActionUptime:
-		text = b.formatUptime()
+		text = b.formatUptime(userID)
 		markup = actionKeyboard("uptime")
 	case data == cbActionStats:
 		text = b.formatStats()
@@ -327,18 +342,21 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 		text = settingsText(b.setNotifyPartial(userID, arg))
 		markup = b.settingsMenuKeyboard(userID)
 	case data == cbStatusAll:
-		text = b.formatStatusAll()
-		markup = b.statusMenuKeyboard("")
+		text = b.formatStatusAll(userID)
+		markup = b.statusMenuKeyboard(userID, "")
 	case strings.HasPrefix(data, cbStatusGroup):
 		group := strings.TrimPrefix(data, cbStatusGroup)
-		text = b.formatStatusGroup(group)
-		markup = b.statusMenuKeyboard(group)
+		text = b.formatStatusGroup(userID, group)
+		markup = b.statusMenuKeyboard(userID, group)
 	case strings.HasPrefix(data, cbStatusHost):
 		host := strings.TrimPrefix(data, cbStatusHost)
-		text = b.formatHost(host)
-		markup = b.hostDetailKeyboard(host)
+		text = b.formatHost(userID, host)
+		markup = b.hostDetailKeyboard(userID, host)
 	default:
 		var handled bool
+		if text, markup, handled = b.handleUsersCallback(data, userID); handled {
+			break
+		}
 		text, markup, handled = b.handleHostCallback(data, userID, q.Message.Chat.ID, q.Message.MessageID)
 		if !handled {
 			text = "Unknown action"
@@ -392,27 +410,28 @@ func (b *Bot) request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 func (b *Bot) notifyEvent(ev alerts.Event) {
 	text := fmt.Sprintf("<b>%s</b>\n%s\n%s", strings.ToUpper(string(ev.Kind)), escapeHTML(ev.Message), ev.At.Format(time.RFC3339))
 	if ev.Kind == alerts.EventPartial {
-		b.sendPartialToSubscribers(text)
+		b.sendToViewers(ev.HostName, text, true)
 		return
 	}
-	b.sendToAll(text)
+	b.sendToViewers(ev.HostName, text, false)
 }
 
 func (b *Bot) sendPartialToSubscribers(text string) {
-	for id := range b.allowed {
-		if !b.notifyPartial[id] {
-			continue
-		}
-		msg := tgbotapi.NewMessage(id, text)
-		msg.ParseMode = tgbotapi.ModeHTML
-		if _, err := b.send(msg); err != nil {
-			slog.Warn("telegram notify failed", "user", id, "error", err)
-		}
-	}
+	b.sendToViewers("", text, true)
 }
 
 func (b *Bot) sendToAll(text string) {
-	for id := range b.allowed {
+	b.sendToViewers("", text, false)
+}
+
+func (b *Bot) sendToViewers(hostName, text string, partialOnly bool) {
+	for _, id := range b.allowedIDs() {
+		if partialOnly && !b.notifyPartial[id] {
+			continue
+		}
+		if hostName != "" && !b.canViewHost(id, hostName) {
+			continue
+		}
 		msg := tgbotapi.NewMessage(id, text)
 		msg.ParseMode = tgbotapi.ModeHTML
 		if _, err := b.send(msg); err != nil {
@@ -447,13 +466,13 @@ func helpText() string {
 		"/notify_partial [on|off] - toggle PARTIAL ping notifications (off by default)",
 		"",
 		"<b>Host management</b>",
-		"Hosts menu → Add host / Manage",
-		"/cancel - cancel current host edit",
+		"Hosts menu → Add host / Manage (root and limited_admin)",
+		"/cancel - cancel current host or user edit",
 	}, "\n")
 }
 
-func (b *Bot) formatList() string {
-	hosts := b.cache.ListHosts()
+func (b *Bot) formatList(userID int64) string {
+	hosts := b.visibleHosts(userID)
 	if len(hosts) == 0 {
 		return "No hosts configured."
 	}
@@ -472,12 +491,18 @@ func (b *Bot) formatList() string {
 	return sb.String()
 }
 
-func (b *Bot) formatStatusAll() string {
-	return b.formatStatusHosts(b.cache.ListHosts(), "All hosts")
+func (b *Bot) formatStatusAll(userID int64) string {
+	return b.formatStatusHosts(b.visibleHosts(userID), "All hosts")
 }
 
-func (b *Bot) formatStatusGroup(group string) string {
-	return b.formatStatusHosts(b.cache.HostsByGroup(group), "Group: "+group)
+func (b *Bot) formatStatusGroup(userID int64, group string) string {
+	var hosts []state.HostView
+	for _, h := range b.visibleHosts(userID) {
+		if h.Group == group {
+			hosts = append(hosts, h)
+		}
+	}
+	return b.formatStatusHosts(hosts, "Group: "+group)
 }
 
 func (b *Bot) formatStatusHosts(hosts []state.HostView, title string) string {
@@ -492,7 +517,10 @@ func (b *Bot) formatStatusHosts(hosts []state.HostView, title string) string {
 	return sb.String()
 }
 
-func (b *Bot) formatHost(name string) string {
+func (b *Bot) formatHost(userID int64, name string) string {
+	if !b.canViewHost(userID, name) {
+		return fmt.Sprintf("Host %q not found.", name)
+	}
 	h, ok := b.cache.GetHost(name)
 	if !ok {
 		return fmt.Sprintf("Host %q not found.", name)
@@ -535,8 +563,8 @@ func (b *Bot) formatHost(name string) string {
 	return sb.String()
 }
 
-func (b *Bot) formatAlerts() string {
-	alerts := b.cache.ListAlerts()
+func (b *Bot) formatAlerts(userID int64) string {
+	alerts := b.filterSnaps(userID, b.cache.ListAlerts())
 	if len(alerts) == 0 {
 		return "No active alerts."
 	}
@@ -551,8 +579,8 @@ func (b *Bot) formatAlerts() string {
 	return sb.String()
 }
 
-func (b *Bot) formatUptime() string {
-	snaps := b.cache.AllGlances()
+func (b *Bot) formatUptime(userID int64) string {
+	snaps := b.filterSnaps(userID, b.cache.AllGlances())
 	if len(snaps) == 0 {
 		return "No glances data."
 	}
@@ -566,8 +594,8 @@ func (b *Bot) formatUptime() string {
 	return sb.String()
 }
 
-func (b *Bot) formatPing() string {
-	snaps := b.cache.AllPing()
+func (b *Bot) formatPing(userID int64) string {
+	snaps := b.filterSnaps(userID, b.cache.AllPing())
 	if len(snaps) == 0 {
 		return "No ping checks."
 	}
@@ -583,8 +611,8 @@ func (b *Bot) formatPing() string {
 	return sb.String()
 }
 
-func (b *Bot) formatHTTP() string {
-	snaps := b.cache.AllHTTP()
+func (b *Bot) formatHTTP(userID int64) string {
+	snaps := b.filterSnaps(userID, b.cache.AllHTTP())
 	if len(snaps) == 0 {
 		return "No HTTP checks."
 	}
@@ -596,8 +624,8 @@ func (b *Bot) formatHTTP() string {
 	return sb.String()
 }
 
-func (b *Bot) formatGlances() string {
-	snaps := b.cache.AllGlances()
+func (b *Bot) formatGlances(userID int64) string {
+	snaps := b.filterSnaps(userID, b.cache.AllGlances())
 	if len(snaps) == 0 {
 		return "No glances checks."
 	}
@@ -679,4 +707,9 @@ func (b *Bot) UpdateConfig(cfg config.TelegramConfig) {
 		allowed[id] = struct{}{}
 	}
 	b.allowed = allowed
+	if b.acl != nil {
+		if err := b.acl.ReloadPrimary(cfg.PrimaryRoot(), cfg.AllowedUsers[1:]); err != nil {
+			slog.Warn("acl reload failed", "error", err)
+		}
+	}
 }

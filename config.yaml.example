@@ -1,7 +1,8 @@
 telegram:
   token: "YOUR_BOT_TOKEN"
   allowed_users:
-    - 123456789
+    - 123456789   # first ID is always root; other users are added in the bot
+  db_path: ""     # empty = {config directory}/db  (file: acl.sqlite)
 
 logging:
   level: INFO

@@ -17,6 +17,15 @@ type Config struct {
 type TelegramConfig struct {
 	Token        string  `yaml:"token"`
 	AllowedUsers []int64 `yaml:"allowed_users"`
+	DBPath       string  `yaml:"db_path,omitempty"`
+}
+
+// PrimaryRoot returns the first allowed user ID, who is always the root operator.
+func (t TelegramConfig) PrimaryRoot() int64 {
+	if len(t.AllowedUsers) == 0 {
+		return 0
+	}
+	return t.AllowedUsers[0]
 }
 
 type LoggingConfig struct {
