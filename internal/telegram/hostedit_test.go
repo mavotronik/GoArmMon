@@ -106,3 +106,38 @@ func TestApplyDiskIgnoreLists(t *testing.T) {
 		t.Fatalf("ignore_devices not set: %+v", h.Alerts.Disk)
 	}
 }
+
+func TestApplyMessageField(t *testing.T) {
+	h := config.DefaultHost("test")
+	cfg := &config.Config{Hosts: []config.HostConfig{h}}
+	if err := applyFieldValue(&h, cfg, 0, "messages.offline", "Router down"); err != nil {
+		t.Fatal(err)
+	}
+	if h.Messages.Offline != "Router down" {
+		t.Fatalf("offline = %q", h.Messages.Offline)
+	}
+	if err := applyFieldValue(&h, cfg, 0, "messages.online", "Router up"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFieldValue(&h, cfg, 0, "messages.warning", "slow"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFieldValue(&h, cfg, 0, "messages.critical", "dying"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFieldValue(&h, cfg, 0, "messages.recovery", "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if h.Messages.Online != "Router up" || h.Messages.Warning != "slow" || h.Messages.Critical != "dying" || h.Messages.Recovery != "ok" {
+		t.Fatalf("messages not set: %+v", h.Messages)
+	}
+	if err := applyFieldValue(&h, cfg, 0, "messages.offline", "clear"); err != nil {
+		t.Fatal(err)
+	}
+	if h.Messages.Offline != "" {
+		t.Fatal("offline should be cleared")
+	}
+	if err := applyFieldValue(&h, cfg, 0, "messages.unknown", "x"); err == nil {
+		t.Fatal("expected error for unknown message field")
+	}
+}

@@ -13,6 +13,12 @@ hosts:
     description: "Home router"
     group: home
     skip_on_ping_failure: true
+    messages:
+      offline: "Роутер недоступен"
+      online: "Роутер снова в сети"
+      warning: "Роутер тормозит"
+      critical: "Роутер почти лёг"
+      recovery: "Роутер в норме"
     alerts:
       rtt:
         warning: 100

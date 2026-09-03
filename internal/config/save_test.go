@@ -78,6 +78,36 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveRoundTripMessages(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestConfig(t, dir)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Hosts[0].Messages = HostMessages{
+		Offline:  "down",
+		Online:   "up",
+		Warning:  "warn",
+		Critical: "crit",
+		Recovery: "ok",
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reloaded.Hosts[0].Messages
+	if got.Offline != "down" || got.Online != "up" || got.Warning != "warn" || got.Critical != "crit" || got.Recovery != "ok" {
+		t.Fatalf("messages = %+v", got)
+	}
+}
+
 func TestClonePreservesHosts(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestConfig(t, dir)

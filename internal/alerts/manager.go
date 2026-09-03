@@ -12,12 +12,12 @@ import (
 type EventKind string
 
 const (
-	EventOffline   EventKind = "offline"
-	EventOnline    EventKind = "online"
-	EventWarning   EventKind = "warning"
-	EventCritical  EventKind = "critical"
-	EventRecovery  EventKind = "recovery"
-	EventPartial   EventKind = "partial"
+	EventOffline  EventKind = "offline"
+	EventOnline   EventKind = "online"
+	EventWarning  EventKind = "warning"
+	EventCritical EventKind = "critical"
+	EventRecovery EventKind = "recovery"
+	EventPartial  EventKind = "partial"
 )
 
 type Event struct {
@@ -49,14 +49,14 @@ type availabilityState struct {
 }
 
 type Manager struct {
-	mu             sync.Mutex
-	hosts          map[string]config.HostConfig
-	checks         map[string]state.Status
-	metrics        map[string]metricState
-	availability   map[string]availabilityState
-	partialLabels  map[string]string
-	events         chan Event
-	now            func() time.Time
+	mu            sync.Mutex
+	hosts         map[string]config.HostConfig
+	checks        map[string]state.Status
+	metrics       map[string]metricState
+	availability  map[string]availabilityState
+	partialLabels map[string]string
+	events        chan Event
+	now           func() time.Time
 }
 
 func NewManager(hosts []config.HostConfig, buffer int) *Manager {
@@ -133,7 +133,7 @@ func (m *Manager) Evaluate(snap state.CheckSnapshot) state.CheckSnapshot {
 	}
 
 	if effective != oldStatus {
-		m.emitTransition(snap, oldStatus, effective)
+		m.emitTransition(host, snap, oldStatus, effective)
 	}
 
 	newPartialLabel := state.PartialLabel(snap.PingFailThreshold, snap.PingFails)
@@ -369,10 +369,14 @@ func formatPartialMessage(snap state.CheckSnapshot, oldLabel, newLabel string) s
 	}
 }
 
-func (m *Manager) emitTransition(snap state.CheckSnapshot, oldStatus, newStatus state.Status) {
+func (m *Manager) emitTransition(host config.HostConfig, snap state.CheckSnapshot, oldStatus, newStatus state.Status) {
 	kind := classifyTransition(oldStatus, newStatus)
 	if kind == "" {
 		return
+	}
+	msg := host.Messages.ForKind(string(kind))
+	if msg == "" {
+		msg = formatMessage(snap, oldStatus, newStatus)
 	}
 	ev := Event{
 		Kind:      kind,
@@ -381,7 +385,7 @@ func (m *Manager) emitTransition(snap state.CheckSnapshot, oldStatus, newStatus 
 		CheckID:   snap.CheckID,
 		OldStatus: oldStatus,
 		NewStatus: newStatus,
-		Message:   formatMessage(snap, oldStatus, newStatus),
+		Message:   msg,
 		At:        time.Now(),
 	}
 	select {

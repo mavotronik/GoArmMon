@@ -390,7 +390,7 @@ func (b *Bot) request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
 }
 
 func (b *Bot) notifyEvent(ev alerts.Event) {
-	text := fmt.Sprintf("<b>%s</b>\n%s\n%s", strings.ToUpper(string(ev.Kind)), ev.Message, ev.At.Format(time.RFC3339))
+	text := fmt.Sprintf("<b>%s</b>\n%s\n%s", strings.ToUpper(string(ev.Kind)), escapeHTML(ev.Message), ev.At.Format(time.RFC3339))
 	if ev.Kind == alerts.EventPartial {
 		b.sendPartialToSubscribers(text)
 		return

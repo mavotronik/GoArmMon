@@ -9,7 +9,7 @@ import (
 )
 
 func floatPtr(v float64) *float64 { return &v }
-func strPtr(v string) *string       { return &v }
+func strPtr(v string) *string     { return &v }
 
 func testHost(forDefault *string, cpu *config.Threshold) config.HostConfig {
 	return config.HostConfig{
@@ -178,5 +178,72 @@ func TestPerMetricForOverridesDefault(t *testing.T) {
 	got := m.Evaluate(glancesSnap(80))
 	if got.Status != state.StatusWarning {
 		t.Fatalf("expected per-metric for to apply, got %s", got.Status)
+	}
+}
+
+func takeEvent(t *testing.T, m *Manager) Event {
+	t.Helper()
+	select {
+	case ev := <-m.Events():
+		return ev
+	default:
+		t.Fatal("expected event")
+		return Event{}
+	}
+}
+
+func TestCustomOfflineOnlineMessages(t *testing.T) {
+	h := pingHost(1)
+	h.Messages = config.HostMessages{
+		Offline: "host is down",
+		Online:  "host is back",
+	}
+	m := NewManager([]config.HostConfig{h}, 8)
+
+	got := m.Evaluate(pingSnap(state.StatusOffline))
+	if got.Status != state.StatusOffline {
+		t.Fatalf("expected OFFLINE, got %s", got.Status)
+	}
+	ev := takeEvent(t, m)
+	if ev.Kind != EventOffline || ev.Message != "host is down" {
+		t.Fatalf("offline event: kind=%s msg=%q", ev.Kind, ev.Message)
+	}
+
+	got = m.Evaluate(pingSnap(state.StatusOnline))
+	if got.Status != state.StatusOnline {
+		t.Fatalf("expected ONLINE, got %s", got.Status)
+	}
+	ev = takeEvent(t, m)
+	if ev.Kind != EventOnline || ev.Message != "host is back" {
+		t.Fatalf("online event: kind=%s msg=%q", ev.Kind, ev.Message)
+	}
+}
+
+func TestCustomWarningMessage(t *testing.T) {
+	h := testHost(nil, &config.Threshold{Warning: floatPtr(70)})
+	h.Messages.Warning = "cpu is high"
+	m := NewManager([]config.HostConfig{h}, 8)
+
+	got := m.Evaluate(glancesSnap(80))
+	if got.Status != state.StatusWarning {
+		t.Fatalf("expected WARNING, got %s", got.Status)
+	}
+	ev := takeEvent(t, m)
+	if ev.Kind != EventWarning || ev.Message != "cpu is high" {
+		t.Fatalf("warning event: kind=%s msg=%q", ev.Kind, ev.Message)
+	}
+}
+
+func TestEmptyMessagesKeepDefaultFormat(t *testing.T) {
+	m := NewManager([]config.HostConfig{pingHost(1)}, 8)
+
+	m.Evaluate(pingSnap(state.StatusOffline))
+	ev := takeEvent(t, m)
+	if ev.Kind != EventOffline {
+		t.Fatalf("expected offline, got %s", ev.Kind)
+	}
+	want := formatMessage(pingSnap(state.StatusOffline), state.StatusUnknown, state.StatusOffline)
+	if ev.Message != want {
+		t.Fatalf("message = %q, want %q", ev.Message, want)
 	}
 }

@@ -26,24 +26,74 @@ type LoggingConfig struct {
 }
 
 type HostConfig struct {
-	Name               string                 `yaml:"name"`
-	Description        string                 `yaml:"description"`
-	Group              string                 `yaml:"group"`
-	SkipOnPingFailure  bool                   `yaml:"skip_on_ping_failure"`
-	PingFailThreshold  int                    `yaml:"-"`
-	Alerts             HostAlerts             `yaml:"alerts"`
-	Checks             []yaml.Node            `yaml:"checks"`
-	rawChecks          []CheckDefinition
+	Name              string       `yaml:"name"`
+	Description       string       `yaml:"description"`
+	Group             string       `yaml:"group"`
+	SkipOnPingFailure bool         `yaml:"skip_on_ping_failure"`
+	PingFailThreshold int          `yaml:"-"`
+	Alerts            HostAlerts   `yaml:"alerts"`
+	Messages          HostMessages `yaml:"messages,omitempty"`
+	Checks            []yaml.Node  `yaml:"checks"`
+	rawChecks         []CheckDefinition
+}
+
+// HostMessages are optional per-host Telegram notification bodies.
+// Empty fields keep the default technical message for that event kind.
+type HostMessages struct {
+	Offline  string `yaml:"offline,omitempty"`
+	Online   string `yaml:"online,omitempty"`
+	Warning  string `yaml:"warning,omitempty"`
+	Critical string `yaml:"critical,omitempty"`
+	Recovery string `yaml:"recovery,omitempty"`
+}
+
+// ForKind returns the custom message for an event kind (offline, online, warning, critical, recovery).
+func (m HostMessages) ForKind(kind string) string {
+	switch kind {
+	case "offline":
+		return m.Offline
+	case "online":
+		return m.Online
+	case "warning":
+		return m.Warning
+	case "critical":
+		return m.Critical
+	case "recovery":
+		return m.Recovery
+	default:
+		return ""
+	}
+}
+
+// ConfiguredKinds returns the event kinds that have a non-empty custom message.
+func (m HostMessages) ConfiguredKinds() []string {
+	kinds := make([]string, 0, 5)
+	if m.Offline != "" {
+		kinds = append(kinds, "offline")
+	}
+	if m.Online != "" {
+		kinds = append(kinds, "online")
+	}
+	if m.Warning != "" {
+		kinds = append(kinds, "warning")
+	}
+	if m.Critical != "" {
+		kinds = append(kinds, "critical")
+	}
+	if m.Recovery != "" {
+		kinds = append(kinds, "recovery")
+	}
+	return kinds
 }
 
 type HostAlerts struct {
-	For            *string        `yaml:"for"`
-	CPU            *Threshold     `yaml:"cpu"`
-	RAM            *Threshold     `yaml:"ram"`
-	Swap           *Threshold     `yaml:"swap"`
-	Disk           *DiskThreshold `yaml:"disk"`
-	RTT            *Threshold     `yaml:"rtt"`
-	HTTPResponse   *Threshold     `yaml:"http_response"`
+	For          *string        `yaml:"for"`
+	CPU          *Threshold     `yaml:"cpu"`
+	RAM          *Threshold     `yaml:"ram"`
+	Swap         *Threshold     `yaml:"swap"`
+	Disk         *DiskThreshold `yaml:"disk"`
+	RTT          *Threshold     `yaml:"rtt"`
+	HTTPResponse *Threshold     `yaml:"http_response"`
 }
 
 type Threshold struct {

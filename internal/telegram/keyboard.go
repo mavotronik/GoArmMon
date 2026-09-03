@@ -17,18 +17,18 @@ const (
 	cbMenuChecks   = "menu:checks"
 	cbMenuSettings = "menu:settings"
 
-	cbActionList   = "action:list"
-	cbActionAlerts = "action:alerts"
-	cbActionPing   = "action:ping"
-	cbActionHTTP   = "action:http"
+	cbActionList    = "action:list"
+	cbActionAlerts  = "action:alerts"
+	cbActionPing    = "action:ping"
+	cbActionHTTP    = "action:http"
 	cbActionGlances = "action:glances"
-	cbActionUptime = "action:uptime"
-	cbActionStats  = "action:stats"
-	cbActionHelp   = "action:help"
+	cbActionUptime  = "action:uptime"
+	cbActionStats   = "action:stats"
+	cbActionHelp    = "action:help"
 
-	cbStatusAll    = "status:all"
-	cbStatusGroup  = "status:group:"
-	cbStatusHost   = "status:host:"
+	cbStatusAll   = "status:all"
+	cbStatusGroup = "status:group:"
+	cbStatusHost  = "status:host:"
 
 	cbNotifyPartial = "action:notify_partial:"
 )
@@ -230,6 +230,10 @@ func (b *Bot) hostManageCardKeyboard(idx int) *tgbotapi.InlineKeyboardMarkup {
 	})
 	rows = append(rows, b.hostAlertsRow(idx)...)
 	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("Messages ▾", cbHostEdit+strconv.Itoa(idx)),
+	})
+	rows = append(rows, b.hostMessagesRow(idx)...)
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardButtonData("Delete host", cbHostDel+strconv.Itoa(idx)),
 	})
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -284,7 +288,7 @@ func (b *Bot) hostChecksRow(idx int) [][]tgbotapi.InlineKeyboardButton {
 func (b *Bot) hostAlertsRow(idx int) [][]tgbotapi.InlineKeyboardButton {
 	prefix := cbHostAlert + strconv.Itoa(idx) + ":"
 	return [][]tgbotapi.InlineKeyboardButton{
-		{tgbotapi.NewInlineKeyboardButtonData("Default for", cbHostField + strconv.Itoa(idx) + ":alerts.for")},
+		{tgbotapi.NewInlineKeyboardButtonData("Default for", cbHostField+strconv.Itoa(idx)+":alerts.for")},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("RTT", prefix+"rtt"),
 			tgbotapi.NewInlineKeyboardButtonData("HTTP", prefix+"http_response"),
@@ -296,6 +300,23 @@ func (b *Bot) hostAlertsRow(idx int) [][]tgbotapi.InlineKeyboardButton {
 		{
 			tgbotapi.NewInlineKeyboardButtonData("Swap", prefix+"swap"),
 			tgbotapi.NewInlineKeyboardButtonData("Disk", prefix+"disk"),
+		},
+	}
+}
+
+func (b *Bot) hostMessagesRow(idx int) [][]tgbotapi.InlineKeyboardButton {
+	prefix := cbHostField + strconv.Itoa(idx) + ":messages."
+	return [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData("Offline", prefix+"offline"),
+			tgbotapi.NewInlineKeyboardButtonData("Online", prefix+"online"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("Warning", prefix+"warning"),
+			tgbotapi.NewInlineKeyboardButtonData("Critical", prefix+"critical"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("Recovery", prefix+"recovery"),
 		},
 	}
 }

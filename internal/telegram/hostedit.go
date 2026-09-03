@@ -17,21 +17,21 @@ import (
 const sessionTTL = 15 * time.Minute
 
 const (
-	cbHostAdd       = "host:add"
-	cbHostManage    = "host:manage"
-	cbHostEdit      = "hedit:"
-	cbHostField     = "hfield:"
-	cbHostCheck     = "hcheck:"
-	cbHostCheckAdd  = "hckadd:"
-	cbHostCheckRm   = "hckrm:"
-	cbHostAlert     = "halert:"
-	cbHostAlertDis  = "halertdis:"
-	cbHostAlertFld  = "hafld:"
-	cbHostToggle    = "htoggle:"
-	cbHostDel       = "host:del:"
-	cbHostDelYes    = "host:del_yes:"
-	cbHostDelNo     = "host:del_no:"
-	cbHostEditFrom  = "heditfrom:"
+	cbHostAdd      = "host:add"
+	cbHostManage   = "host:manage"
+	cbHostEdit     = "hedit:"
+	cbHostField    = "hfield:"
+	cbHostCheck    = "hcheck:"
+	cbHostCheckAdd = "hckadd:"
+	cbHostCheckRm  = "hckrm:"
+	cbHostAlert    = "halert:"
+	cbHostAlertDis = "halertdis:"
+	cbHostAlertFld = "hafld:"
+	cbHostToggle   = "htoggle:"
+	cbHostDel      = "host:del:"
+	cbHostDelYes   = "host:del_yes:"
+	cbHostDelNo    = "host:del_no:"
+	cbHostEditFrom = "heditfrom:"
 )
 
 type editSession struct {
@@ -540,6 +540,9 @@ func applyFieldValue(h *config.HostConfig, cfg *config.Config, idx int, fieldPat
 		}
 		h.Alerts.For = v
 	default:
+		if strings.HasPrefix(fieldPath, "messages.") {
+			return applyMessageField(h, fieldPath, value)
+		}
 		if strings.HasPrefix(fieldPath, "checks.ping.") {
 			return applyPingField(h, fieldPath, value)
 		}
@@ -553,6 +556,28 @@ func applyFieldValue(h *config.HostConfig, cfg *config.Config, idx int, fieldPat
 			return applyAlertField(h, fieldPath, value)
 		}
 		return fmt.Errorf("unknown field %q", fieldPath)
+	}
+	return nil
+}
+
+func applyMessageField(h *config.HostConfig, fieldPath, value string) error {
+	text := ""
+	if !isClearValue(value) {
+		text = strings.TrimSpace(value)
+	}
+	switch fieldPath {
+	case "messages.offline":
+		h.Messages.Offline = text
+	case "messages.online":
+		h.Messages.Online = text
+	case "messages.warning":
+		h.Messages.Warning = text
+	case "messages.critical":
+		h.Messages.Critical = text
+	case "messages.recovery":
+		h.Messages.Recovery = text
+	default:
+		return fmt.Errorf("unknown message field")
 	}
 	return nil
 }
@@ -767,6 +792,16 @@ func fieldDescription(fieldPath string) string {
 		return "Human-readable description."
 	case "group":
 		return "Group label for filtering in status view."
+	case "messages.offline":
+		return "Custom text for OFFLINE notifications. Empty uses the default technical message."
+	case "messages.online":
+		return "Custom text for ONLINE notifications. Empty uses the default technical message."
+	case "messages.warning":
+		return "Custom text for WARNING notifications. Empty uses the default technical message."
+	case "messages.critical":
+		return "Custom text for CRITICAL notifications. Empty uses the default technical message."
+	case "messages.recovery":
+		return "Custom text for RECOVERY notifications. Empty uses the default technical message."
 	case "alerts.for":
 		return "Default alert forbearance duration (e.g. <code>2m</code>, <code>30s</code>)."
 	case "checks.ping.address":
@@ -816,6 +851,16 @@ func formatFieldValue(h config.HostConfig, fieldPath string) string {
 		return h.Group
 	case "alerts.for":
 		return ptrStr(h.Alerts.For)
+	case "messages.offline":
+		return emptyDash(h.Messages.Offline)
+	case "messages.online":
+		return emptyDash(h.Messages.Online)
+	case "messages.warning":
+		return emptyDash(h.Messages.Warning)
+	case "messages.critical":
+		return emptyDash(h.Messages.Critical)
+	case "messages.recovery":
+		return emptyDash(h.Messages.Recovery)
 	default:
 		if strings.HasPrefix(fieldPath, "checks.ping.") {
 			cfg, _, ok := config.GetPingCheck(&h)
@@ -946,6 +991,13 @@ func ptrStr(s *string) string {
 	return *s
 }
 
+func emptyDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
 func ptrFloat(f *float64) string {
 	if f == nil {
 		return "-"
@@ -985,6 +1037,11 @@ func (b *Bot) formatHostManageCard(idx int) string {
 		sb.WriteString(fmt.Sprintf("Group: %s\n", escapeHTML(h.Group)))
 	}
 	sb.WriteString(fmt.Sprintf("skip_on_ping_failure: %v\n", h.SkipOnPingFailure))
+	if kinds := h.Messages.ConfiguredKinds(); len(kinds) > 0 {
+		sb.WriteString("Messages: " + strings.Join(kinds, ", ") + "\n")
+	} else {
+		sb.WriteString("Messages: default\n")
+	}
 	sb.WriteString("\n<b>Checks:</b> " + strings.Join(config.ListCheckTypes(h), ", ") + "\n")
 	sb.WriteString("\nUse buttons below to edit sections.")
 	return sb.String()
