@@ -17,12 +17,13 @@ import (
 )
 
 type Scheduler struct {
-	cache   *state.Cache
-	alerts  *alerts.Manager
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	hostCfg map[string]config.HostConfig
+	cache      *state.Cache
+	alerts     *alerts.Manager
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	hostCfg    map[string]config.HostConfig
+	logResults bool
 }
 
 func New(cache *state.Cache, alertMgr *alerts.Manager) *Scheduler {
@@ -56,6 +57,7 @@ func (s *Scheduler) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		})
 	}
 	s.hostCfg = hostCfg
+	s.logResults = cfg.Logging.LogResults
 	s.cache.SetHosts(hostMeta)
 	s.alerts.UpdateHosts(cfg.Hosts)
 
@@ -96,6 +98,7 @@ func (s *Scheduler) runCheck(ctx context.Context, host config.HostConfig, runner
 				}
 				snap = s.alerts.Evaluate(snap)
 				s.cache.Update(snap)
+				s.logCheckResult(snap)
 				return
 			}
 		}
@@ -103,6 +106,7 @@ func (s *Scheduler) runCheck(ctx context.Context, host config.HostConfig, runner
 		snap := runner.Run(ctx)
 		snap = s.alerts.Evaluate(snap)
 		s.cache.Update(snap)
+		s.logCheckResult(snap)
 	}
 
 	runOnce()
@@ -114,6 +118,46 @@ func (s *Scheduler) runCheck(ctx context.Context, host config.HostConfig, runner
 			runOnce()
 		}
 	}
+}
+
+func (s *Scheduler) logCheckResult(snap state.CheckSnapshot) {
+	if !s.logResults {
+		return
+	}
+
+	attrs := []any{
+		"host", snap.HostName,
+		"type", snap.CheckType,
+		"status", snap.Status,
+	}
+	if snap.Skipped {
+		attrs = append(attrs, "skipped", true)
+		slog.Info("check result", attrs...)
+		return
+	}
+	if snap.Error != "" {
+		attrs = append(attrs, "error", snap.Error)
+	}
+
+	switch snap.CheckType {
+	case "ping":
+		attrs = append(attrs, "rtt", snap.RTT)
+		if snap.PingFailThreshold > 0 {
+			attrs = append(attrs, "fails", snap.PingFails, "fail_threshold", snap.PingFailThreshold)
+		}
+	case "http":
+		attrs = append(attrs, "code", snap.HTTPCode, "duration", snap.HTTPDuration)
+	case "glances":
+		if snap.Glances != nil {
+			attrs = append(attrs,
+				"cpu", snap.Glances.CPU,
+				"ram", snap.Glances.RAM,
+				"swap", snap.Glances.Swap,
+			)
+		}
+	}
+
+	slog.Info("check result", attrs...)
 }
 
 func (s *Scheduler) Stop() {

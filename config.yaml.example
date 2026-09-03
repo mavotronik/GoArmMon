@@ -6,6 +6,7 @@ telegram:
 logging:
   level: INFO
   file: ""
+  log_results: false
 
 hosts:
   - name: router

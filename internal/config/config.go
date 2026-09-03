@@ -20,8 +20,9 @@ type TelegramConfig struct {
 }
 
 type LoggingConfig struct {
-	Level string `yaml:"level"`
-	File  string `yaml:"file"`
+	Level      string `yaml:"level"`
+	File       string `yaml:"file"`
+	LogResults bool   `yaml:"log_results"`
 }
 
 type HostConfig struct {
