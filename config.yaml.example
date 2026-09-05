@@ -2,13 +2,15 @@ telegram:
   token: "YOUR_BOT_TOKEN"
   allowed_users:
     - 123456789   # first ID is always root; other users are added in the bot
-  db_path: ""     # empty = {config directory}/db  (file: acl.sqlite)
+  db_path: ""     # empty = {config directory}/db  (file: acl.sqlite — ACL and hosts)
 
 logging:
   level: INFO
   file: ""
   log_results: false
 
+# Optional seed: imported into SQLite on first start/reload, then removed from this file.
+# Ongoing host management is via Telegram: Hosts → Add host / Manage.
 hosts:
   - name: router
     description: "Home router"

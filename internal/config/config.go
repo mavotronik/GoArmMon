@@ -11,7 +11,7 @@ import (
 type Config struct {
 	Telegram TelegramConfig `yaml:"telegram"`
 	Logging  LoggingConfig  `yaml:"logging"`
-	Hosts    []HostConfig   `yaml:"hosts"`
+	Hosts    []HostConfig   `yaml:"hosts,omitempty"`
 }
 
 type TelegramConfig struct {
@@ -142,13 +142,14 @@ func (c *Config) validate() error {
 	if len(c.Telegram.AllowedUsers) == 0 {
 		return fmt.Errorf("telegram.allowed_users must not be empty")
 	}
-	if len(c.Hosts) == 0 {
-		return fmt.Errorf("at least one host is required")
-	}
+	return ValidateHostList(c.Hosts)
+}
 
-	names := make(map[string]struct{}, len(c.Hosts))
-	for i := range c.Hosts {
-		h := &c.Hosts[i]
+// ValidateHostList validates host definitions. An empty list is allowed.
+func ValidateHostList(hosts []HostConfig) error {
+	names := make(map[string]struct{}, len(hosts))
+	for i := range hosts {
+		h := &hosts[i]
 		if h.Name == "" {
 			return fmt.Errorf("host[%d]: name is required", i)
 		}
@@ -156,31 +157,40 @@ func (c *Config) validate() error {
 			return fmt.Errorf("host %q: duplicate name", h.Name)
 		}
 		names[h.Name] = struct{}{}
-
-		if len(h.Checks) == 0 {
-			return fmt.Errorf("host %q: at least one check is required", h.Name)
+		if err := PrepareHost(h); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		h.rawChecks = make([]CheckDefinition, 0, len(h.Checks))
-		for j, node := range h.Checks {
-			var meta struct {
-				Type string `yaml:"type"`
-			}
-			if err := node.Decode(&meta); err != nil {
-				return fmt.Errorf("host %q check[%d]: %w", h.Name, j, err)
-			}
-			if meta.Type == "" {
-				return fmt.Errorf("host %q check[%d]: type is required", h.Name, j)
-			}
-			h.rawChecks = append(h.rawChecks, CheckDefinition{
-				Type: meta.Type,
-				Raw:  node,
-			})
-		}
-
-		h.resolvePingFailThreshold()
+// PrepareHost parses check definitions and derived fields for a host.
+func PrepareHost(h *HostConfig) error {
+	if h.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if len(h.Checks) == 0 {
+		return fmt.Errorf("host %q: at least one check is required", h.Name)
 	}
 
+	h.rawChecks = make([]CheckDefinition, 0, len(h.Checks))
+	for j, node := range h.Checks {
+		var meta struct {
+			Type string `yaml:"type"`
+		}
+		if err := node.Decode(&meta); err != nil {
+			return fmt.Errorf("host %q check[%d]: %w", h.Name, j, err)
+		}
+		if meta.Type == "" {
+			return fmt.Errorf("host %q check[%d]: type is required", h.Name, j)
+		}
+		h.rawChecks = append(h.rawChecks, CheckDefinition{
+			Type: meta.Type,
+			Raw:  node,
+		})
+	}
+
+	h.resolvePingFailThreshold()
 	return nil
 }
 

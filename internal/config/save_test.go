@@ -151,8 +151,50 @@ func TestSaveRequiresValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Hosts = nil
+	cfg.Telegram.Token = ""
 	if err := Save(path, cfg); err == nil {
-		t.Fatal("expected validation error for empty hosts")
+		t.Fatal("expected validation error for empty token")
+	}
+}
+
+func TestSaveAllowsEmptyHosts(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestConfig(t, dir)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Hosts = nil
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Hosts) != 0 {
+		t.Fatalf("hosts = %d, want 0", len(reloaded.Hosts))
+	}
+}
+
+func TestLoadWithoutHostsSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `telegram:
+  token: "test-token"
+  allowed_users:
+    - 1
+logging:
+  level: INFO
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Hosts) != 0 {
+		t.Fatalf("hosts = %d, want 0", len(cfg.Hosts))
 	}
 }

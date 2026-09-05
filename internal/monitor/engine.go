@@ -12,6 +12,7 @@ import (
 	"goarmmon/internal/acl"
 	"goarmmon/internal/alerts"
 	"goarmmon/internal/config"
+	"goarmmon/internal/hoststore"
 	"goarmmon/internal/logger"
 	"goarmmon/internal/scheduler"
 	"goarmmon/internal/state"
@@ -26,6 +27,7 @@ type Engine struct {
 	sched   *scheduler.Scheduler
 	bot     *telegram.Bot
 	acl     *acl.Store
+	hosts   *hoststore.Store
 	mu      sync.Mutex
 	cfg     *config.Config
 	runCtx  context.Context
@@ -49,12 +51,24 @@ func (e *Engine) Run(ctx context.Context) error {
 		return fmt.Errorf("logger: %w", err)
 	}
 	e.log = log
+
+	dbFile := config.ACLDBFile(config.ResolveDBDir(e.cfgPath, cfg.Telegram.DBPath))
+	hostStore, err := hoststore.Open(dbFile)
+	if err != nil {
+		return fmt.Errorf("host store: %w", err)
+	}
+	e.hosts = hostStore
+	defer hostStore.Close()
+
+	cfg, err = e.syncHosts(cfg)
+	if err != nil {
+		return err
+	}
 	e.cfg = cfg
 
 	e.alerts = alerts.NewManager(cfg.Hosts, 256)
 	e.sched = scheduler.New(e.cache, e.alerts)
 
-	dbFile := config.ACLDBFile(config.ResolveDBDir(e.cfgPath, cfg.Telegram.DBPath))
 	aclStore, err := acl.Open(dbFile, cfg.Telegram.PrimaryRoot(), cfg.Telegram.AllowedUsers[1:])
 	if err != nil {
 		return fmt.Errorf("acl: %w", err)
@@ -91,11 +105,46 @@ func (e *Engine) Run(ctx context.Context) error {
 		return fmt.Errorf("config watch: %w", err)
 	}
 
-	slog.Info("monitor started", "config", e.cfgPath, "acl_db", dbFile, "root", cfg.Telegram.PrimaryRoot())
+	slog.Info("monitor started", "config", e.cfgPath, "acl_db", dbFile, "root", cfg.Telegram.PrimaryRoot(), "hosts", len(cfg.Hosts))
 	e.bot.Run(ctx, e.alerts.Events())
 
 	e.sched.Stop()
 	return nil
+}
+
+func (e *Engine) syncHosts(cfg *config.Config) (*config.Config, error) {
+	if len(cfg.Hosts) > 0 {
+		result, err := e.hosts.ImportNew(cfg.Hosts)
+		if err != nil {
+			return nil, fmt.Errorf("import hosts from config: %w", err)
+		}
+		for _, name := range result.Imported {
+			slog.Info("imported host from config", "host", name)
+		}
+		for _, name := range result.Skipped {
+			slog.Info("skipped host already in database", "host", name)
+		}
+		if len(result.Imported) > 0 || len(result.Skipped) > 0 {
+			slog.Info("hosts imported from config", "imported", len(result.Imported), "skipped", len(result.Skipped))
+		}
+
+		stripped, err := config.Clone(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("clone config for host strip: %w", err)
+		}
+		stripped.Hosts = nil
+		if err := config.Save(e.cfgPath, stripped); err != nil {
+			return nil, fmt.Errorf("strip hosts from config: %w", err)
+		}
+		cfg = stripped
+	}
+
+	hosts, err := e.hosts.List()
+	if err != nil {
+		return nil, fmt.Errorf("load hosts from database: %w", err)
+	}
+	cfg.Hosts = hosts
+	return cfg, nil
 }
 
 func (e *Engine) onConfigReload(ctx context.Context, cfg *config.Config) {
@@ -106,7 +155,15 @@ func (e *Engine) onConfigReload(ctx context.Context, cfg *config.Config) {
 		slog.Warn("logger reconfigure failed", "error", err)
 	}
 
+	synced, err := e.syncHosts(cfg)
+	if err != nil {
+		slog.Warn("host sync failed", "error", err)
+		return
+	}
+	cfg = synced
+
 	e.cfg = cfg
+	e.alerts.UpdateHosts(cfg.Hosts)
 	e.bot.UpdateConfig(cfg.Telegram)
 	e.sched.ApplyConfig(ctx, cfg)
 }
@@ -151,8 +208,11 @@ func (e *Engine) MutateConfig(fn func(*config.Config) error) error {
 	if err := fn(clone); err != nil {
 		return err
 	}
-	if err := config.Save(e.cfgPath, clone); err != nil {
+	if err := config.ValidateHostList(clone.Hosts); err != nil {
 		return err
+	}
+	if err := e.hosts.ReplaceAll(clone.Hosts); err != nil {
+		return fmt.Errorf("save hosts to database: %w", err)
 	}
 
 	ctx := e.runCtx
@@ -164,6 +224,7 @@ func (e *Engine) MutateConfig(fn func(*config.Config) error) error {
 		slog.Warn("logger reconfigure failed", "error", err)
 	}
 	e.cfg = clone
+	e.alerts.UpdateHosts(clone.Hosts)
 	e.bot.UpdateConfig(clone.Telegram)
 	e.sched.ApplyConfig(ctx, clone)
 	return nil
