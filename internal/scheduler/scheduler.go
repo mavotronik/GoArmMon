@@ -16,9 +16,14 @@ import (
 	_ "goarmmon/internal/checks/ping"
 )
 
+type PauseChecker interface {
+	IsPaused(hostName string) bool
+}
+
 type Scheduler struct {
 	cache      *state.Cache
 	alerts     *alerts.Manager
+	pauses     PauseChecker
 	mu         sync.Mutex
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
@@ -32,6 +37,10 @@ func New(cache *state.Cache, alertMgr *alerts.Manager) *Scheduler {
 		alerts:  alertMgr,
 		hostCfg: make(map[string]config.HostConfig),
 	}
+}
+
+func (s *Scheduler) SetPauses(pauses PauseChecker) {
+	s.pauses = pauses
 }
 
 func (s *Scheduler) ApplyConfig(ctx context.Context, cfg *config.Config) {
@@ -82,6 +91,25 @@ func (s *Scheduler) runCheck(ctx context.Context, host config.HostConfig, runner
 	defer ticker.Stop()
 
 	runOnce := func() {
+		if s.pauses != nil && s.pauses.IsPaused(host.Name) {
+			snap := state.CheckSnapshot{
+				HostName:  host.Name,
+				CheckType: runner.Type(),
+				CheckID:   runner.ID(),
+				Skipped:   true,
+				UpdatedAt: time.Now(),
+			}
+			if prev, ok := s.cache.GetCheck(runner.ID()); ok {
+				snap.Status = prev.Status
+			} else {
+				snap.Status = state.StatusUnknown
+			}
+			snap = s.alerts.Evaluate(snap)
+			s.cache.Update(snap)
+			s.logCheckResult(snap)
+			return
+		}
+
 		if host.SkipOnPingFailure && runner.Type() != "ping" {
 			if st, ok := s.cache.PingStatus(host.Name); ok && st == state.StatusOffline {
 				snap := state.CheckSnapshot{

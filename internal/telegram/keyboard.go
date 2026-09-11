@@ -193,7 +193,20 @@ func menuTitle(category string) string {
 	}
 }
 
-func hostDetailKeyboardWithEdit(hostName string, idx int) *tgbotapi.InlineKeyboardMarkup {
+func (b *Bot) hostDetailKeyboard(userID int64, hostName string) *tgbotapi.InlineKeyboardMarkup {
+	editIdx := -1
+	if b.canEditHost(userID, hostName) {
+		if i, ok := hostIndexByName(b.store, hostName); ok {
+			editIdx = i
+		}
+	}
+	hostIdx := -1
+	if b.store != nil {
+		if i, ok := hostIndexByName(b.store, hostName); ok {
+			hostIdx = i
+		}
+	}
+
 	rows := [][]tgbotapi.InlineKeyboardButton{
 		backToMenuRow(),
 		{tgbotapi.NewInlineKeyboardButtonData("« Hosts", cbMenuHosts)},
@@ -204,23 +217,21 @@ func hostDetailKeyboardWithEdit(hostName string, idx int) *tgbotapi.InlineKeyboa
 			tgbotapi.NewInlineKeyboardButtonData("Refresh", cbStatusHost+hostName),
 		})
 	}
-	if idx >= 0 {
+	if hostIdx >= 0 {
 		rows = append(rows, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData("Edit", cbHostEdit+strconv.Itoa(idx)),
+			tgbotapi.NewInlineKeyboardButtonData(
+				b.pauseButtonLabel(hostName),
+				cbHostPauseMenu+strconv.Itoa(hostIdx),
+			),
+		})
+	}
+	if editIdx >= 0 {
+		rows = append(rows, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("Edit", cbHostEdit+strconv.Itoa(editIdx)),
 		})
 	}
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &markup
-}
-
-func (b *Bot) hostDetailKeyboard(userID int64, hostName string) *tgbotapi.InlineKeyboardMarkup {
-	idx := -1
-	if b.canEditHost(userID, hostName) {
-		if i, ok := hostIndexByName(b.store, hostName); ok {
-			idx = i
-		}
-	}
-	return hostDetailKeyboardWithEdit(hostName, idx)
 }
 
 func (b *Bot) hostManageListKeyboard(userID int64) *tgbotapi.InlineKeyboardMarkup {

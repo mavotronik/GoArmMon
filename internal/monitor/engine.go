@@ -12,6 +12,7 @@ import (
 	"goarmmon/internal/acl"
 	"goarmmon/internal/alerts"
 	"goarmmon/internal/config"
+	"goarmmon/internal/hostpause"
 	"goarmmon/internal/hoststore"
 	"goarmmon/internal/logger"
 	"goarmmon/internal/scheduler"
@@ -28,6 +29,7 @@ type Engine struct {
 	bot     *telegram.Bot
 	acl     *acl.Store
 	hosts   *hoststore.Store
+	pauses  *hostpause.Store
 	mu      sync.Mutex
 	cfg     *config.Config
 	runCtx  context.Context
@@ -69,6 +71,14 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.alerts = alerts.NewManager(cfg.Hosts, 256)
 	e.sched = scheduler.New(e.cache, e.alerts)
 
+	pauseStore, err := hostpause.Open(dbFile)
+	if err != nil {
+		return fmt.Errorf("host pause store: %w", err)
+	}
+	e.pauses = pauseStore
+	defer pauseStore.Close()
+	e.sched.SetPauses(pauseStore)
+
 	aclStore, err := acl.Open(dbFile, cfg.Telegram.PrimaryRoot(), cfg.Telegram.AllowedUsers[1:])
 	if err != nil {
 		return fmt.Errorf("acl: %w", err)
@@ -80,6 +90,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.bot = bot
 	bot.SetACL(aclStore)
 	bot.SetStartupConfigPath(e.cfgPath)
+	bot.SetPauses(pauseStore)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -213,6 +224,16 @@ func (e *Engine) MutateConfig(fn func(*config.Config) error) error {
 	}
 	if err := e.hosts.ReplaceAll(clone.Hosts); err != nil {
 		return fmt.Errorf("save hosts to database: %w", err)
+	}
+
+	if e.pauses != nil {
+		names := make([]string, len(clone.Hosts))
+		for i, h := range clone.Hosts {
+			names[i] = h.Name
+		}
+		if err := e.pauses.Prune(names); err != nil {
+			return fmt.Errorf("prune host pauses: %w", err)
+		}
 	}
 
 	ctx := e.runCtx

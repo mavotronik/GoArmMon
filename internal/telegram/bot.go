@@ -11,6 +11,7 @@ import (
 	"goarmmon/internal/acl"
 	"goarmmon/internal/alerts"
 	"goarmmon/internal/config"
+	"goarmmon/internal/hostpause"
 	"goarmmon/internal/state"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -30,6 +31,7 @@ type Bot struct {
 	startupCfgPath  string
 	store           ConfigStore
 	acl             *acl.Store
+	pauses          *hostpause.Store
 	runCtx          context.Context
 	hostEdit        *hostEditor
 	userEdit        *userEditor
@@ -354,6 +356,9 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 		markup = b.hostDetailKeyboard(userID, host)
 	default:
 		var handled bool
+		if text, markup, handled = b.handleHostPauseCallback(data, userID); handled {
+			break
+		}
 		if text, markup, handled = b.handleUsersCallback(data, userID); handled {
 			break
 		}
@@ -527,6 +532,7 @@ func (b *Bot) formatHost(userID int64, name string) string {
 	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("<b>%s</b> — %s\n", h.Name, h.StatusLabel()))
+	sb.WriteString(b.formatHostChecksPauseLine(name) + "\n")
 	if h.Description != "" {
 		sb.WriteString(escapeHTML(h.Description) + "\n")
 	}

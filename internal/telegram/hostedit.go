@@ -642,6 +642,11 @@ func (b *Bot) applyFieldEdit(idx int, fieldPath, value string) error {
 			slog.Warn("acl rename host failed", "old", oldName, "new", newName, "error", renErr)
 		}
 	}
+	if b.pauses != nil && fieldPath == "name" && oldName != "" && newName != "" && oldName != newName {
+		if renErr := b.pauses.Rename(oldName, newName); renErr != nil {
+			slog.Warn("pause rename host failed", "old", oldName, "new", newName, "error", renErr)
+		}
+	}
 	return nil
 }
 
