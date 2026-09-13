@@ -27,6 +27,7 @@ type Scheduler struct {
 	mu         sync.Mutex
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+	gen        uint64
 	hostCfg    map[string]config.HostConfig
 	logResults bool
 }
@@ -49,8 +50,10 @@ func (s *Scheduler) ApplyConfig(ctx context.Context, cfg *config.Config) {
 
 	if s.cancel != nil {
 		s.cancel()
-		s.wg.Wait()
 	}
+
+	s.gen++
+	currentGen := s.gen
 
 	runCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
@@ -78,17 +81,32 @@ func (s *Scheduler) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		}
 		for _, runner := range runners {
 			s.wg.Add(1)
-			go s.runCheck(runCtx, host, runner)
+			go s.runCheck(runCtx, currentGen, host, runner)
 		}
 	}
 }
 
-func (s *Scheduler) runCheck(ctx context.Context, host config.HostConfig, runner checks.Runner) {
+func (s *Scheduler) runCheck(ctx context.Context, gen uint64, host config.HostConfig, runner checks.Runner) {
 	defer s.wg.Done()
 
 	interval := runner.Interval()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	publish := func(snap state.CheckSnapshot) {
+		s.mu.Lock()
+		stale := gen != s.gen
+		logResults := s.logResults
+		s.mu.Unlock()
+		if stale {
+			return
+		}
+		snap = s.alerts.Evaluate(snap)
+		s.cache.Update(snap)
+		if logResults {
+			s.logCheckResult(snap)
+		}
+	}
 
 	runOnce := func() {
 		if s.pauses != nil && s.pauses.IsPaused(host.Name) {
@@ -104,9 +122,7 @@ func (s *Scheduler) runCheck(ctx context.Context, host config.HostConfig, runner
 			} else {
 				snap.Status = state.StatusUnknown
 			}
-			snap = s.alerts.Evaluate(snap)
-			s.cache.Update(snap)
-			s.logCheckResult(snap)
+			publish(snap)
 			return
 		}
 
@@ -124,17 +140,13 @@ func (s *Scheduler) runCheck(ctx context.Context, host config.HostConfig, runner
 				} else {
 					snap.Status = state.StatusUnknown
 				}
-				snap = s.alerts.Evaluate(snap)
-				s.cache.Update(snap)
-				s.logCheckResult(snap)
+				publish(snap)
 				return
 			}
 		}
 
 		snap := runner.Run(ctx)
-		snap = s.alerts.Evaluate(snap)
-		s.cache.Update(snap)
-		s.logCheckResult(snap)
+		publish(snap)
 	}
 
 	runOnce()
@@ -190,10 +202,12 @@ func (s *Scheduler) logCheckResult(snap state.CheckSnapshot) {
 
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancel != nil {
-		s.cancel()
+	cancel := s.cancel
+	s.cancel = nil
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 		s.wg.Wait()
-		s.cancel = nil
 	}
 }
