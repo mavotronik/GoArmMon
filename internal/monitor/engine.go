@@ -90,6 +90,13 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.bot = bot
 	bot.SetACL(aclStore)
 	bot.SetStartupConfigPath(e.cfgPath)
+
+	msgLog, err := telegram.OpenMessageLog(dbFile)
+	if err != nil {
+		return fmt.Errorf("message log: %w", err)
+	}
+	defer msgLog.Close()
+	bot.SetMessageLog(msgLog)
 	bot.SetPauses(pauseStore)
 
 	ctx, cancel := context.WithCancel(ctx)

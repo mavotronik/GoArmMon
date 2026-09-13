@@ -14,10 +14,35 @@ type Config struct {
 	Hosts    []HostConfig   `yaml:"hosts,omitempty"`
 }
 
+const (
+	DefaultDeleteAfter = 48 * time.Hour
+	MaxDeleteAfter     = 48 * time.Hour
+)
+
 type TelegramConfig struct {
 	Token        string  `yaml:"token"`
 	AllowedUsers []int64 `yaml:"allowed_users"`
 	DBPath       string  `yaml:"db_path,omitempty"`
+	DeleteAfter  string  `yaml:"delete_after,omitempty"`
+}
+
+// DeleteAfterDuration returns how long bot messages are kept before auto-deletion.
+// Empty defaults to 48h. Zero disables auto-deletion.
+func (t TelegramConfig) DeleteAfterDuration() (time.Duration, error) {
+	if t.DeleteAfter == "" {
+		return DefaultDeleteAfter, nil
+	}
+	d, err := time.ParseDuration(t.DeleteAfter)
+	if err != nil {
+		return 0, fmt.Errorf("telegram.delete_after: invalid duration %q", t.DeleteAfter)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("telegram.delete_after: must not be negative")
+	}
+	if d > MaxDeleteAfter {
+		return 0, fmt.Errorf("telegram.delete_after must not exceed 48h")
+	}
+	return d, nil
 }
 
 // PrimaryRoot returns the first allowed user ID, who is always the root operator.
@@ -141,6 +166,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.Telegram.AllowedUsers) == 0 {
 		return fmt.Errorf("telegram.allowed_users must not be empty")
+	}
+	if _, err := c.Telegram.DeleteAfterDuration(); err != nil {
+		return err
 	}
 	return ValidateHostList(c.Hosts)
 }

@@ -17,7 +17,11 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const connectRetryInterval = 5 * time.Second
+const (
+	connectRetryInterval = 5 * time.Second
+	cleanupInterval      = 15 * time.Minute
+	deletePause          = 75 * time.Millisecond
+)
 
 type Bot struct {
 	apiMu           sync.RWMutex
@@ -31,6 +35,7 @@ type Bot struct {
 	startupCfgPath  string
 	store           ConfigStore
 	acl             *acl.Store
+	msgLog          *MessageLog
 	pauses          *hostpause.Store
 	runCtx          context.Context
 	hostEdit        *hostEditor
@@ -53,8 +58,13 @@ func New(cfg config.TelegramConfig, cache *state.Cache) *Bot {
 	}
 }
 
+func (b *Bot) SetMessageLog(log *MessageLog) {
+	b.msgLog = log
+}
+
 func (b *Bot) Run(ctx context.Context, events <-chan alerts.Event) {
 	go b.connectionLoop(ctx)
+	go b.cleanupLoop(ctx)
 
 	var updates tgbotapi.UpdatesChannel
 	for {
@@ -401,7 +411,16 @@ func (b *Bot) send(ch tgbotapi.Chattable) (tgbotapi.Message, error) {
 	if api == nil {
 		return tgbotapi.Message{}, fmt.Errorf("telegram not connected")
 	}
-	return api.Send(ch)
+	msg, err := api.Send(ch)
+	if err != nil {
+		return msg, err
+	}
+	if b.msgLog != nil && msg.MessageID != 0 && msg.Chat != nil && msg.Chat.ID != 0 {
+		if recErr := b.msgLog.Record(msg.Chat.ID, msg.MessageID, time.Now()); recErr != nil {
+			slog.Warn("telegram message log record failed", "error", recErr)
+		}
+	}
+	return msg, nil
 }
 
 func (b *Bot) request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
@@ -718,4 +737,77 @@ func (b *Bot) UpdateConfig(cfg config.TelegramConfig) {
 			slog.Warn("acl reload failed", "error", err)
 		}
 	}
+}
+
+func (b *Bot) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(cleanupInterval)
+	defer ticker.Stop()
+
+	b.runCleanup(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.runCleanup(ctx)
+		}
+	}
+}
+
+func (b *Bot) runCleanup(ctx context.Context) {
+	if b.msgLog == nil {
+		return
+	}
+	ttl, err := b.cfg.DeleteAfterDuration()
+	if err != nil || ttl == 0 {
+		return
+	}
+	if b.apiClient() == nil {
+		return
+	}
+
+	cutoff := time.Now().Add(-ttl)
+	expired, err := b.msgLog.Expired(cutoff)
+	if err != nil {
+		slog.Warn("telegram message log expired query failed", "error", err)
+		return
+	}
+	for _, m := range expired {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if b.deleteLoggedMessage(m) {
+			time.Sleep(deletePause)
+		}
+	}
+}
+
+func (b *Bot) deleteLoggedMessage(m BotMessage) bool {
+	del := tgbotapi.NewDeleteMessage(m.ChatID, m.MessageID)
+	if _, err := b.request(del); err != nil {
+		if isDeleteGoneError(err) {
+			if remErr := b.msgLog.Remove(m.ChatID, m.MessageID); remErr != nil {
+				slog.Warn("telegram message log remove failed", "error", remErr)
+			}
+			return false
+		}
+		slog.Debug("telegram message delete failed", "chat", m.ChatID, "message", m.MessageID, "error", err)
+		return false
+	}
+	if err := b.msgLog.Remove(m.ChatID, m.MessageID); err != nil {
+		slog.Warn("telegram message log remove failed", "error", err)
+	}
+	return true
+}
+
+func isDeleteGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "message to delete not found") ||
+		strings.Contains(msg, "message can't be deleted")
 }

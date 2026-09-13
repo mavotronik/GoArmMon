@@ -3,6 +3,7 @@ telegram:
   allowed_users:
     - 123456789   # first ID is always root; other users are added in the bot
   db_path: ""     # empty = {config directory}/db  (file: acl.sqlite — ACL and hosts)
+  delete_after: 48h  # auto-delete bot messages after this age (max 48h; 0s = off)
 
 logging:
   level: INFO
